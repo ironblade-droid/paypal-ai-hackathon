@@ -9,6 +9,7 @@ export function loadConfig(env = process.env) {
     webhookId: env.PAYPAL_SANDBOX_WEBHOOK_ID || '',
     port: Number(env.PORT || 3000),
     dryRun: env.PROOFPILOT_DRY_RUN === '1',
+    writePasscode: env.PROOFPILOT_WRITE_PASSCODE || '',
     dataFile: env.PROOFPILOT_DATA_FILE || new URL('../data/store.json', import.meta.url).pathname,
     hasCredentials: Boolean(env.PAYPAL_SANDBOX_CLIENT_ID && env.PAYPAL_SANDBOX_CLIENT_SECRET),
   };

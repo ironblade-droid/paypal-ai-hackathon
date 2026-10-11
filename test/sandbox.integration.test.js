@@ -1,4 +1,4 @@
-// Live PayPal SANDBOX test. Skipped unless PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET are set.
+// Live PayPal SANDBOX test. Runs only with PROOFPILOT_RUN_SANDBOX_TESTS=1 and the sandbox env vars.
 // Read-only except creating one unapproved order (it expires unused).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +10,9 @@ import { analyseDispute } from '../src/disputeService.js';
 
 const has = Boolean(process.env.PAYPAL_SANDBOX_CLIENT_ID && process.env.PAYPAL_SANDBOX_CLIENT_SECRET);
 const DISPUTE = process.env.PROOFPILOT_TEST_DISPUTE_ID || 'PP-R-PGV-10190981';
-const skip = has ? false : 'PayPal sandbox env vars not set';
+// Opt-in only: `npm test` never calls the sandbox (it would create an order). Use `npm run test:sandbox`.
+const optIn = process.env.PROOFPILOT_RUN_SANDBOX_TESTS === '1';
+const skip = !optIn ? 'sandbox test is opt-in: run `npm run test:sandbox`' : has ? false : 'PayPal sandbox env vars not set';
 
 test('sandbox: token, list disputes, analyse known dispute, create order', { skip, timeout: 60000 }, async () => {
   const client = createPayPalClient({ clientId: process.env.PAYPAL_SANDBOX_CLIENT_ID, clientSecret: process.env.PAYPAL_SANDBOX_CLIENT_SECRET });

@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import { createApp } from '../src/app.js';
 import { createStore } from '../src/lib/store.js';
 import { rulesEngine } from '../src/engine/recommend.js';
@@ -102,11 +103,16 @@ test('webhook endpoint stores events (unverified without webhook id)', async () 
   s.close();
 });
 
-test('no AG Grid Enterprise and no "won" wording anywhere in UI/README', () => {
-  const files = ['public/queue.html', 'public/orders.html', 'public/dispute.html', 'public/shop.html', 'public/common.js', 'README.md', 'package.json'];
+test('no AG Grid Enterprise; no outcome wording (won/win/winning/winner/seller favour) in UI, README or user-facing src', () => {
+  const NO_WIN = /\b(won|win|wins|winning|winner)\b|seller fav|resolved in (the )?seller|in your favou?r/i;
+  const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1').split('\n').filter(l => !l.includes('OUTCOME_WORDS') && !l.includes('NO_WIN')).join('\n');
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
+  const root = new URL('..', import.meta.url).pathname;
+  const files = [...walk(path.join(root, 'public')), ...walk(path.join(root, 'src')), path.join(root, 'README.md'), ...fs.readdirSync(path.join(root, 'docs')).filter(f => f.endsWith('.md')).map(f => path.join(root, 'docs', f))];
   for (const f of files) {
-    const t = fs.readFileSync(new URL('../' + f, import.meta.url), 'utf8');
+    const t = fs.readFileSync(f, 'utf8');
     assert.doesNotMatch(t, /ag-grid-enterprise|setLicenseKey|LicenseManager/, f);
-    assert.doesNotMatch(t.replace(/never "won"[^\n]*/gi, ''), /\bwon\b|resolved in seller fav/i, f);
+    const body = f.endsWith('.md') ? t.replace(/never (claims|says)[^\n]*/gi, '') : strip(t);
+    assert.doesNotMatch(body, NO_WIN, f);
   }
 });

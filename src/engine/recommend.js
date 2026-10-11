@@ -5,13 +5,14 @@
 //   returns   { action: 'FIGHT'|'OFFER'|'ACCEPT'|'WAIT', evidenceType?, reasons: string[], availableActions: string[], engine }
 // An LLM-backed engine may only re-rank or explain; it must return claims that pass validateClaims() unchanged,
 // and the seller must still approve. No LLM key is configured in this build, so the default is the deterministic
-// rules engine below. It is NOT AI and the UI labels it "rules engine".
+// rules engine below. It is NOT AI and the UI labels it "rules engine". Since v0.2 the LLM advisor (src/ai/advisor.js)
+// runs on top of it when GEMINI_API_KEY or GROQ_API_KEY is set; this engine stays as the fallback and the sanity check.
 import { sellerActions } from './status.js';
 
 export const rulesEngine = {
   name: 'proofpilot-rules-v1',
   kind: 'deterministic',
-  recommend({ dispute, allowedTypes = [], packs = {}, acceptBelow = 0 }) {
+  recommend({ dispute, allowedTypes = [], packs = {}, acceptBelow = 0, rejectedTypes = [] }) {
     const actions = sellerActions(dispute);
     const amount = Number(dispute?.dispute_amount?.value || 0);
     const cur = dispute?.dispute_amount?.currency_code || '';
@@ -31,8 +32,8 @@ export const rulesEngine = {
       if (can('provide_supporting_info')) reasons.push('You can add supporting information if you have new records.');
       return { ...base, action: 'WAIT', reasons };
     }
-    const strong = allowedTypes.filter(t => packs[t]?.requirementMet && packs[t]?.validation?.ok);
-    const reasons = [];
+    const strong = allowedTypes.filter(t => packs[t]?.requirementMet && packs[t]?.validation?.ok && !rejectedTypes.includes(t));
+    const reasons = rejectedTypes.length ? [`PayPal already refused ${rejectedTypes.join(', ')} on this dispute (EVIDENCE_TYPE_IS_NOT_ALLOWED), so ProofPilot does not recommend sending it again.`] : [];
     if (dispute?.reason === 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED' && strong.includes('PROOF_OF_FULFILLMENT') && can('provide_evidence')) {
       reasons.push('Reason is item not received, and PayPal has a registered tracker for this capture.');
       reasons.push('PayPal asked for PROOF_OF_FULFILLMENT and every claim in the pack links to a PayPal record.');
@@ -55,6 +56,5 @@ export const rulesEngine = {
 };
 
 export function createDecisionEngine(env = process.env) {
-  // Hook point: when an LLM key is configured, wrap rulesEngine with an LLM explainer here. Not implemented in v1.
   return { ...rulesEngine, acceptBelow: Number(env.PROOFPILOT_ACCEPT_BELOW || 0) };
 }

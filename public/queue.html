@@ -4,14 +4,14 @@
 <body><main>
 <div id="cfg"></div>
 <h1>Dispute queue</h1>
-<p class="muted">Live from PayPal Disputes v1. Sorted by what needs you first. Refreshes every 30 seconds.</p>
+<p class="muted">Live from PayPal Disputes v1, sorted by what needs you first. Deadlines count down live. Refreshes every 30 seconds.</p>
 <div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
   <input id="q" placeholder="Filter…"> <button class="sec" id="refresh">Refresh</button>
   <span class="muted" id="meta"></span>
   <span style="margin-left:auto"><input id="openId" placeholder="Open dispute by ID (PP-R-…)" size="26"> <button class="sec" id="openBtn">Open</button></span>
 </div>
 <div id="waitBanner"></div>
-<div id="grid" class="ag-theme-quartz" style="height:420px"></div>
+<div id="grid" class="ag-theme-quartz pp-grid" style="height:420px"></div>
 </main>
 <script>
 PP.nav('/disputes');
@@ -30,19 +30,18 @@ async function load() {
   await PP.configBanner(document.getElementById('cfg'));
   grid = agGrid.createGrid(document.getElementById('grid'), {
     columnDefs: [
-      { field: 'label', headerName: 'Status', width: 190, cellRenderer: p => PP.badge(p.value, p.data.tone), comparator: (a, b, na, nb) => order[na.data.tone] - order[nb.data.tone], sort: 'asc' },
-      { field: 'id', headerName: 'Dispute', width: 190, cellRenderer: p => `<a href="/disputes/${encodeURIComponent(p.value)}">${PP.esc(p.value)}</a>` },
-      { field: 'reason', flex: 1, minWidth: 200 },
-      { field: 'amount', width: 110, valueFormatter: p => `${p.data.currency} ${Number(p.value).toFixed(2)}`, filter: 'agNumberColumnFilter' },
-      { field: 'stage', width: 120 },
-      { field: 'hoursLeft', headerName: 'Respond within', width: 140, valueFormatter: p => p.value == null ? '—' : p.value < 0 ? 'overdue' : `${p.value} h`,
-        cellStyle: p => p.value != null && p.value < 48 ? { color: '#b3261e', fontWeight: 700 } : null },
-      { field: 'requested', headerName: 'PayPal asks for', width: 200 },
-      { field: 'actions', headerName: 'Actions offered', width: 200, valueFormatter: p => p.value || 'none yet' },
-      { field: 'protection', headerName: 'Seller Protection', width: 140, valueFormatter: p => p.value == null ? '—' : p.value ? 'eligible' : 'not eligible' },
-      { field: 'updated', width: 170, valueFormatter: p => p.value ? new Date(p.value).toLocaleString() : '' },
+      { field: 'label', headerName: 'Status', width: 210, cellRenderer: PP.StatusChipRenderer, comparator: (a, b, na, nb) => order[na.data.tone] - order[nb.data.tone] || String(na.data.due || 'z').localeCompare(String(nb.data.due || 'z')), sort: 'asc' },
+      { field: 'id', headerName: 'Dispute', width: 180, cellRenderer: p => `<a href="/disputes/${encodeURIComponent(p.value)}">${PP.esc(p.value)}</a>` },
+      { field: 'reason', headerName: 'Reason', width: 160, valueFormatter: p => PP.h('reason', p.value), tooltipField: 'reason' },
+      { field: 'amount', headerName: 'Amount', width: 110, valueFormatter: p => `${p.data.currency} ${Number(p.value).toFixed(2)}`, filter: 'agNumberColumnFilter' },
+      { field: 'due', headerName: 'Respond within', width: 170, cellRenderer: PP.CountdownRenderer, comparator: (a, b) => String(a || 'z').localeCompare(String(b || 'z')) },
+      { field: 'requested', headerName: 'PayPal asks for', width: 210, cellRenderer: PP.ChipsRenderer, cellRendererParams: { kind: 'evidence', empty: 'nothing requested' } },
+      { field: 'actions', headerName: 'You can', width: 230, cellRenderer: PP.ChipsRenderer, cellRendererParams: { kind: 'action', empty: 'no action yet' } },
+      { field: 'stage', headerName: 'Stage', width: 140, valueFormatter: p => (PP.h('stage', p.value) || '').split(' (')[0], tooltipValueGetter: p => PP.h('stage', p.value) },
+      { field: 'protection', headerName: 'Seller Protection', width: 140, valueFormatter: p => p.value == null ? '—' : p.value ? 'Eligible' : 'Not eligible' },
+      { field: 'updated', headerName: 'Updated', width: 170, valueFormatter: p => p.value ? new Date(p.value).toLocaleString() : '' },
     ],
-    defaultColDef: { sortable: true, filter: true, resizable: true },
+    defaultColDef: { sortable: true, filter: true, resizable: true }, tooltipShowDelay: 300,
     onRowDoubleClicked: e => location.href = '/disputes/' + encodeURIComponent(e.data.id),
   });
   load(); setInterval(load, 30000);

@@ -5,15 +5,16 @@ import { fileURLToPath } from 'node:url';
 import { CATALOG, findSku } from './catalog.js';
 import { checkShipment } from './engine/risk.js';
 import { describeStatus, deadline, sandboxSimLinks } from './engine/status.js';
-import { validateClaims } from './engine/evidence.js';
-import { analyseDispute, submitDecision, SubmitError } from './disputeService.js';
+import { validateClaims, allowedEvidenceTypes } from './engine/evidence.js';
+import { analyseDispute, submitDecision, aiAdvice, SubmitError } from './disputeService.js';
+import { LABELS } from './engine/labels.js';
 import { PayPalError } from './paypal/client.js';
 import { redact, log } from './lib/redact.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, '..', 'public');
 
-export function createApp({ api, store, engine, config }) {
+export function createApp({ api, store, engine, config, llm = null }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
@@ -27,10 +28,16 @@ export function createApp({ api, store, engine, config }) {
   app.get('/disputes/:id', page('dispute.html'));
 
   const needApi = (_req, res, next) => api ? next() : res.status(503).json({ error: 'NO_CREDENTIALS', message: 'Set PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET (sandbox app) and restart.' });
+  // Optional passcode for actions that write to PayPal or spend AI quota (set PROOFPILOT_WRITE_PASSCODE on a public host).
+  const guard = (req, res, next) => (!config.writePasscode || req.get('x-proofpilot-passcode') === config.writePasscode) ? next()
+    : res.status(401).json({ error: 'PASSCODE_REQUIRED', message: 'This demo host needs the reviewer passcode for actions that write to PayPal.' });
   const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 
-  app.get('/healthz', (_req, res) => res.json({ ok: true, sandbox: true, credentials: Boolean(api), dryRun: config.dryRun, engine: engine.name }));
-  app.get('/api/config', (_req, res) => res.json({ clientId: config.clientId || null, environment: 'sandbox', credentials: Boolean(api), dryRun: config.dryRun, engine: { name: engine.name, kind: engine.kind } }));
+  const aiInfo = () => llm ? { configured: true, provider: llm.provider, model: llm.model, label: llm.label } : { configured: false, reason: 'No GEMINI_API_KEY or GROQ_API_KEY set' };
+  app.get('/favicon.ico', (_req, res) => res.status(204).end());
+  app.get('/healthz', (_req, res) => res.json({ ok: true, sandbox: true, credentials: Boolean(api), dryRun: config.dryRun, engine: engine.name, ai: aiInfo() }));
+  app.get('/api/config', (_req, res) => res.json({ clientId: config.clientId || null, environment: 'sandbox', credentials: Boolean(api), dryRun: config.dryRun,
+    passcodeRequired: Boolean(config.writePasscode), engine: { name: engine.name, kind: engine.kind }, ai: aiInfo(), labels: LABELS }));
   app.get('/api/catalog', (_req, res) => res.json(CATALOG));
 
   // ---------- Orders v2 (checkout through our backend)
@@ -74,7 +81,7 @@ export function createApp({ api, store, engine, config }) {
   }));
 
   // ---------- Ship: risk gate, then Shipment Tracking, then read back the tracker from PayPal
-  app.post('/api/orders/:id/ship', needApi, wrap(async (req, res) => {
+  app.post('/api/orders/:id/ship', needApi, guard, wrap(async (req, res) => {
     const { carrier, trackingNumber, shipTo, signatureConfirmation, overrideAck } = req.body || {};
     if (!carrier || !trackingNumber) return res.status(400).json({ error: 'MISSING_TRACKING', message: 'carrier and trackingNumber are required' });
     const { order, capture, risk } = await liveRisk(req.params.id, { shipTo, signatureConfirmation });
@@ -99,9 +106,9 @@ export function createApp({ api, store, engine, config }) {
       const st = describeStatus(d); const dl = deadline(d);
       return { id: d.dispute_id, reason: d.reason, amount: Number(d.dispute_amount?.value || 0), currency: d.dispute_amount?.currency_code,
         paypalStatus: d.status, label: st.label, tone: st.tone, waiting: st.waiting, stage: d.dispute_life_cycle_stage,
-        due: dl?.due || null, hoursLeft: dl?.hoursLeft ?? null, actions: st.actions.join(', '),
+        due: dl?.due || null, hoursLeft: dl?.hoursLeft ?? null, actions: st.actions,
         protection: d.disputed_transactions?.[0]?.seller_protection_eligible ?? null,
-        requested: (d.evidences || []).filter(e => e.source === 'REQUESTED_FROM_SELLER').map(e => e.evidence_type).join(', '),
+        requested: allowedEvidenceTypes(d),
         created: d.create_time, updated: d.update_time };
     }));
     res.json({ items, fetchedAt: new Date().toISOString() });
@@ -118,12 +125,17 @@ export function createApp({ api, store, engine, config }) {
     res.json(validateClaims(req.body?.claims || [], a._ctx.recs.registry));
   }));
 
-  app.post('/api/disputes/:id/submit', needApi, wrap(async (req, res) => {
+  // AI advice (Gemini or Groq). Every drafted sentence has already passed the strict citation checker.
+  app.post('/api/disputes/:id/ai', needApi, guard, wrap(async (req, res) => {
+    res.json(await aiAdvice({ api, store, engine, llm }, req.params.id, { refresh: Boolean(req.body?.refresh) }));
+  }));
+
+  app.post('/api/disputes/:id/submit', needApi, guard, wrap(async (req, res) => {
     res.json(await submitDecision({ api, store, engine, config }, req.params.id, req.body));
   }));
 
   // Sandbox-only helper to open a fresh test dispute as the sandbox buyer (needs buyer consent; off by default).
-  app.post('/api/sandbox/disputes', needApi, wrap(async (req, res) => {
+  app.post('/api/sandbox/disputes', needApi, guard, wrap(async (req, res) => {
     if (process.env.PROOFPILOT_ENABLE_SANDBOX_TOOLS !== '1') return res.status(403).json({ error: 'SANDBOX_TOOLS_DISABLED', message: 'Set PROOFPILOT_ENABLE_SANDBOX_TOOLS=1 to enable.' });
     const { buyerEmail, buyerTransactionId, amount } = req.body || {};
     if (!buyerEmail || !buyerTransactionId) return res.status(400).json({ error: 'MISSING_FIELDS' });
@@ -134,7 +146,7 @@ export function createApp({ api, store, engine, config }) {
   }));
 
   // Sandbox-only: simulate PayPal asking the seller for evidence (only when PayPal offers the require_evidence link).
-  app.post('/api/sandbox/disputes/:id/require-evidence', needApi, wrap(async (req, res) => {
+  app.post('/api/sandbox/disputes/:id/require-evidence', needApi, guard, wrap(async (req, res) => {
     if (process.env.PROOFPILOT_ENABLE_SANDBOX_TOOLS !== '1') return res.status(403).json({ error: 'SANDBOX_TOOLS_DISABLED', message: 'Set PROOFPILOT_ENABLE_SANDBOX_TOOLS=1 to enable.' });
     const d = await api.getDispute(req.params.id);
     if (!sandboxSimLinks(d).includes('require_evidence')) return res.status(409).json({ error: 'NOT_OFFERED', message: 'PayPal does not offer require-evidence on this dispute now.' });
@@ -156,15 +168,23 @@ export function createApp({ api, store, engine, config }) {
       if (verification !== 'SUCCESS') { store.addWebhook({ at: new Date().toISOString(), id: evt.id, type: evt.event_type, verification, accepted: false }); return res.status(400).json({ error: 'WEBHOOK_NOT_VERIFIED' }); }
     }
     const resourceId = evt.resource?.dispute_id || evt.resource?.id;
-    store.addWebhook({ at: new Date().toISOString(), id: evt.id, type: evt.event_type, resourceId, verification, accepted: true });
+    const entry = store.addWebhook({ at: new Date().toISOString(), id: evt.id, type: evt.event_type, resourceId, verification, accepted: true });
     res.json({ received: true, verification });
+    // Auto-analyse dispute events (read-only): status, deadline, requested evidence and the rules recommendation.
+    if (api && /^CUSTOMER\.DISPUTE\./.test(evt.event_type || '') && resourceId && (verification === 'SUCCESS' || !config.webhookId)) {
+      analyseDispute({ api, store, engine }, resourceId)
+        .then(a => { entry.analysis = { label: a.status.label, allowedTypes: a.allowedTypes, recommendation: a.recommendation.action, deadline: a.deadline?.due || null }; store.save(); })
+        .catch(e => { entry.analysis = { error: e.issue || e.message }; store.save(); });
+    }
   }));
   app.get('/api/webhooks', (_req, res) => res.json(store.data.webhooks.slice(0, 50)));
 
   // ---------- Errors: PayPal errors are passed through with debug_id, never with credentials
   app.use((err, _req, res, _next) => {
     if (err instanceof SubmitError) return res.status(409).json({ error: err.code, message: err.message, ...err.extra });
-    if (err instanceof PayPalError) { log('PayPal error', err.message, err.debugId || ''); return res.status(err.status >= 500 ? 502 : err.status).json({ error: 'PAYPAL_ERROR', issue: err.issue, debugId: err.debugId, status: err.status }); }
+    if (err instanceof PayPalError) { log('PayPal error', err.message, err.debugId || ''); return res.status(err.status >= 500 ? 502 : err.status).json({ error: 'PAYPAL_ERROR', issue: err.issue, debugId: err.debugId, status: err.status,
+      message: `PayPal refused the request: ${err.issue}${err.body?.details?.[0]?.description ? ` (${err.body.details[0].description})` : ''}. debug_id ${err.debugId || 'n/a'}`,
+      details: (err.body?.details || []).map(d => ({ issue: d.issue, field: d.field, description: d.description })) }); }
     log('Internal error', redact(err.stack || err.message));
     res.status(500).json({ error: 'INTERNAL', message: redact(err.message) });
   });

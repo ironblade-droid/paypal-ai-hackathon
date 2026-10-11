@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkShipment } from '../src/engine/risk.js';
-import { allowedEvidenceTypes, makeRegistry, validateClaims, buildPack, packHash, toEvidencePayload, packPdf } from '../src/engine/evidence.js';
+import { classifyRefund, allowedEvidenceTypes, makeRegistry, validateClaims, buildPack, packHash, toEvidencePayload, packPdf } from '../src/engine/evidence.js';
 import { describeStatus, deadline } from '../src/engine/status.js';
 import { rulesEngine } from '../src/engine/recommend.js';
 import { order, capture, tracker, dispute, links } from './fixtures.js';
@@ -106,4 +106,32 @@ test('rules engine: ACCEPT under threshold without evidence, OFFER when offer li
 test('rules engine: UNDER_REVIEW with accept_claim offered still recommends WAIT (no refund mid-review)', () => {
   const r = rulesEngine.recommend({ dispute: dispute({ status: 'UNDER_REVIEW', links: links('accept_claim', 'adjudicate', 'require_evidence', 'provide_supporting_info') }), allowedTypes: [], packs: {} });
   assert.equal(r.action, 'WAIT'); assert.ok(r.availableActions.includes('accept_claim')); assert.ok(!r.availableActions.includes('adjudicate'));
+});
+
+test('refund that matches the dispute HOLD_PLACED movement is a PayPal dispute hold, never proof of refund', () => {
+  const hold = { id: '44V27761ED882372G', status: 'PENDING', amount: { currency_code: 'USD', value: '4.82' }, create_time: '2026-10-11T02:25:32-07:00' };
+  const d = dispute({ fund_movements: [{ party: 'RECEIVER', amount: { currency_code: 'USD', value: '4.82' }, initiated_time: '2026-10-11T09:25:32.000Z', type: 'DEBIT', reason: 'HOLD_PLACED' }] });
+  assert.equal(classifyRefund(hold, d).kind, 'DISPUTE_HOLD');
+  assert.equal(classifyRefund({ ...hold, status: 'COMPLETED' }, dispute()).kind, 'SELLER_REFUND');
+  assert.equal(classifyRefund(hold, dispute()).kind, 'PENDING_REVERSAL');
+  const ord = { ...order, purchase_units: [{ ...order.purchase_units[0], payments: { captures: [capture], refunds: [hold] } }] };
+  const r = reg(); r.add('refund', hold.id, { ...hold, proofpilot_classification: 'DISPUTE_HOLD' });
+  const p = buildPack('PROOF_OF_REFUND', { dispute: d, capture, order: ord, trackers: [], registry: r });
+  assert.equal(p.requirementMet, false); assert.ok(p.gaps.some(g => g.code === 'DISPUTE_HOLD_NOT_REFUND'));
+  const v = validateClaims([{ id: 'x', text: 'Refunded', refs: [{ type: 'refund', id: hold.id }] }], r);
+  assert.equal(v.rejected[0].reason, 'NOT_A_SELLER_REFUND');
+});
+
+test('tracking claims are labelled as sandbox test data', () => {
+  const p = buildPack('PROOF_OF_FULFILLMENT', { dispute: dispute(), capture, order, trackers: [tracker], registry: reg() });
+  assert.match(p.claims.find(c => c.id.startsWith('tracker-')).text, /sandbox test tracking number, no real parcel/);
+});
+
+test('rules engine: a type PayPal already refused is not recommended again', () => {
+  const r = rulesEngine.recommend({ dispute: dispute(), allowedTypes: ['PROOF_OF_FULFILLMENT'], packs: { PROOF_OF_FULFILLMENT: { requirementMet: true, validation: { ok: true } } }, rejectedTypes: ['PROOF_OF_FULFILLMENT'] });
+  assert.notEqual(r.action, 'FIGHT'); assert.match(r.reasons[0], /already refused PROOF_OF_FULFILLMENT/);
+});
+test('unsupported requested types (e.g. delivery signature) are never ready', () => {
+  const p = buildPack('PROOF_OF_DELIVERY_SIGNATURE', { dispute: dispute(), capture, order, trackers: [tracker], registry: reg() });
+  assert.equal(p.requirementMet, false); assert.ok(p.gaps.some(g => g.code === 'UNSUPPORTED_EVIDENCE_TYPE'));
 });

@@ -21,7 +21,7 @@ export function recordKey(type, id) { return `${type}:${id}`; }
 export function makeRegistry() {
   const map = new Map();
   return {
-    add(type, id, data, source) { if (id) map.set(recordKey(type, id), { type, id, source, verified: true, fetchedAt: new Date().toISOString(), data }); },
+    add(type, id, data, source, note) { if (id) map.set(recordKey(type, id), { type, id, source, note, verified: true, fetchedAt: new Date().toISOString(), data }); },
     get(type, id) { return map.get(recordKey(type, id)); },
     has(type, id) { return map.has(recordKey(type, id)); },
     list() { return [...map.values()].map(({ data, ...r }) => r); },
@@ -49,12 +49,29 @@ export async function gatherRecords(api, dispute, store) {
     try {
       const t = await api.listTrackers(captureId);
       trackers = t?.trackers || [];
-      for (const tr of trackers) reg.add('tracker', `${tr.transaction_id}-${tr.tracking_number}`, tr, 'GET /v1/shipping/trackers');
+      for (const tr of trackers) reg.add('tracker', `${tr.transaction_id}-${tr.tracking_number}`, tr, 'GET /v1/shipping/trackers', TEST_TRACKING_NOTE);
     } catch (e) { gaps.push({ code: 'TRACKERS_UNAVAILABLE', message: `Could not read trackers: ${e.issue || e.message}` }); }
-    for (const r of order?.purchase_units?.[0]?.payments?.refunds || [])
-      reg.add('refund', r.id, r, 'GET /v2/checkout/orders/{id} (payments.refunds)');
+    for (const r of order?.purchase_units?.[0]?.payments?.refunds || []) {
+      const cls = classifyRefund(r, dispute);
+      reg.add('refund', r.id, { ...r, proofpilot_classification: cls.kind }, 'GET /v2/checkout/orders/{id} (payments.refunds)', cls.label);
+    }
   } else gaps.push({ code: 'NO_SELLER_TXN', message: 'Dispute lists no seller transaction id.' });
   return { registry: reg, capture, order, trackers, gaps };
+}
+
+// Sandbox-only app: every tracking number is test data, never a real parcel. Say so wherever it is cited.
+export const TEST_TRACKING_NOTE = 'Sandbox test data: tracking number registered in the PayPal sandbox, no real parcel.';
+
+// What is this refund record really? PayPal records the dispute hold on the seller's balance as a PENDING
+// refund-type entry (same amount and second as the dispute's HOLD_PLACED fund movement). That is NOT a refund the
+// seller issued, so it must never back a PROOF_OF_REFUND claim.
+export function classifyRefund(refund, dispute) {
+  const t = Date.parse(refund?.create_time || 0);
+  const hold = (dispute?.fund_movements || []).find(m => m.reason === 'HOLD_PLACED' && m.amount?.value === refund?.amount?.value
+    && Math.abs(Date.parse(m.initiated_time || 0) - t) <= 120_000);
+  if (hold) return { kind: 'DISPUTE_HOLD', label: `PayPal dispute hold (not a seller refund): matches the dispute's HOLD_PLACED fund movement of ${hold.amount.currency_code} ${hold.amount.value} at ${hold.initiated_time}.` };
+  if (refund?.status !== 'COMPLETED') return { kind: 'PENDING_REVERSAL', label: `Refund record with status ${refund?.status}: not a completed refund.` };
+  return { kind: 'SELLER_REFUND', label: 'Completed refund.' };
 }
 
 const money = (a) => (a ? `${a.currency_code} ${a.value}` : 'unknown amount');
@@ -79,35 +96,63 @@ export function buildPack(evidenceType, { dispute, capture, order, trackers, reg
   if (['PROOF_OF_FULFILLMENT', 'OTHER', 'SUPPORTING_INFO'].includes(evidenceType)) {
     if (!trackers.length && evidenceType === 'PROOF_OF_FULFILLMENT') gaps.push({ code: 'NO_TRACKER', message: 'No tracking is registered with PayPal for this capture. Proof of fulfillment needs a tracker record.' });
     for (const t of trackers) {
-      c(`tracker-${t.tracking_number}`, `Shipped with ${t.carrier}${t.carrier_name_other ? ` (${t.carrier_name_other})` : ''}, tracking ${t.tracking_number}, registered with PayPal (status ${t.status}).`,
+      c(`tracker-${t.tracking_number}`, `Shipped with ${t.carrier}${t.carrier_name_other ? ` (${t.carrier_name_other})` : ''}, tracking ${t.tracking_number}, registered with PayPal (status ${t.status}) [sandbox test tracking number, no real parcel].`,
         [{ type: 'tracker', id: `${t.transaction_id}-${t.tracking_number}` }]);
     }
-    if (trackers.length && addr && localOrder?.shippedTo && localOrder.shippedToMatchesOrder)
-      c('shipped-to-order-address', 'The parcel was shipped to the address on the PayPal order (pre-ship check passed).',
-        [{ type: 'order', id: order.id }, { type: 'tracker', id: `${trackers[0].transaction_id}-${trackers[0].tracking_number}` }]);
+    // Only the tracker ProofPilot itself added after a passed pre-ship check can back the "shipped to the order address" claim.
+    const shipped = localOrder?.tracking && trackers.find(t => t.tracking_number === localOrder.tracking.trackingNumber);
+    if (shipped && addr && localOrder.shippedToMatchesOrder)
+      c('shipped-to-order-address', `Tracking ${shipped.tracking_number} was added by ProofPilot after the pre-ship check confirmed the ship-to address matches the PayPal order.`,
+        [{ type: 'order', id: order.id }, { type: 'tracker', id: `${shipped.transaction_id}-${shipped.tracking_number}` }]);
   }
   if (evidenceType === 'PROOF_OF_REFUND') {
-    const done = (order?.purchase_units?.[0]?.payments?.refunds || []).filter(r => r.status === 'COMPLETED');
-    if (!done.length) gaps.push({ code: 'NO_COMPLETED_REFUND', message: 'No completed refund exists on this order, so proof of refund cannot be claimed.' });
+    const all = order?.purchase_units?.[0]?.payments?.refunds || [];
+    const done = all.filter(r => classifyRefund(r, dispute).kind === 'SELLER_REFUND');
+    for (const r of all.filter(r => classifyRefund(r, dispute).kind === 'DISPUTE_HOLD'))
+      gaps.push({ code: 'DISPUTE_HOLD_NOT_REFUND', message: `Record ${r.id} is PayPal's dispute hold, not a refund you issued. ProofPilot will not cite it as proof of refund.` });
+    if (!done.length) gaps.push({ code: 'NO_COMPLETED_REFUND', message: 'No completed seller refund exists on this order, so proof of refund cannot be claimed.' });
     for (const r of done) c(`refund-${r.id}`, `Refund ${r.id} of ${money(r.amount)} completed.`, [{ type: 'refund', id: r.id }]);
   }
+  if (!SUPPORTED_TYPES.includes(evidenceType))
+    gaps.push({ code: 'UNSUPPORTED_EVIDENCE_TYPE', message: `PayPal asks for ${evidenceType}. That needs a document ProofPilot does not have (no PayPal API record proves it), so ProofPilot will not send a pack under this label.` });
   return { evidenceType, claims, gaps, requirementMet: meetsRequirement(evidenceType, claims) };
 }
 
+// Types ProofPilot can back with PayPal records. Anything else (signature, receipt, police report, ...) needs a document
+// ProofPilot does not hold, so it is never "ready" and cannot be sent under that label.
+export const SUPPORTED_TYPES = ['PROOF_OF_FULFILLMENT', 'PROOF_OF_REFUND', 'OTHER', 'SUPPORTING_INFO'];
 export function meetsRequirement(type, claims) {
   if (type === 'PROOF_OF_FULFILLMENT') return claims.some(c => c.refs.some(r => r.type === 'tracker'));
-  if (type === 'PROOF_OF_REFUND') return claims.some(c => c.refs.some(r => r.type === 'refund'));
+  if (type === 'PROOF_OF_REFUND') return claims.some(c => c.refs.some(r => r.type === 'refund'));  // checker below rejects dispute holds
+  if (!SUPPORTED_TYPES.includes(type)) return false;
   return claims.length > 0;
 }
 
 // ---- The checker. Refuses any claim with no linked record, or a link to a record we did not fetch.
-export function validateClaims(claims, registry) {
+// Words that predict or claim a case outcome. Generated text containing them is refused.
+export const OUTCOME_WORDS = /\b(won|win|wins|winning|winner|guarantee[sd]?|certain(ly)? to|will be (resolved|decided) in)\b|seller fav/i;
+
+// Values a sentence states (amounts, long ids, tracking numbers) must appear in the records it cites.
+export function unsupportedValues(text, refs, registry) {
+  const tokens = [...new Set([...(String(text).match(/\b\d+\.\d{2}\b/g) || []), ...(String(text).match(/\b(?=[A-Z0-9-]*\d)[A-Z0-9][A-Z0-9-]{9,}\b/g) || [])])];
+  const hay = refs.map(r => JSON.stringify(registry.get(r.type, r.id)?.data || {}) + ' ' + r.id).join(' ');
+  return tokens.filter(t => !hay.includes(t));
+}
+
+export function validateClaims(claims, registry, { strict = false } = {}) {
   const accepted = []; const rejected = [];
   for (const cl of claims) {
     if (!cl || typeof cl.text !== 'string' || !cl.text.trim()) { rejected.push({ claimId: cl?.id, reason: 'EMPTY_CLAIM' }); continue; }
     if (!Array.isArray(cl.refs) || cl.refs.length === 0) { rejected.push({ claimId: cl.id, reason: 'NO_LINKED_RECORD' }); continue; }
     const missing = cl.refs.filter(r => !registry.has(r.type, r.id));
     if (missing.length) { rejected.push({ claimId: cl.id, reason: 'UNKNOWN_RECORD', missing }); continue; }
+    const holds = cl.refs.filter(r => r.type === 'refund' && registry.get(r.type, r.id)?.data?.proofpilot_classification !== 'SELLER_REFUND');
+    if (holds.length) { rejected.push({ claimId: cl.id, reason: 'NOT_A_SELLER_REFUND', missing: holds }); continue; }
+    if (strict) {
+      if (OUTCOME_WORDS.test(cl.text)) { rejected.push({ claimId: cl.id, reason: 'OUTCOME_CLAIM' }); continue; }
+      const bad = unsupportedValues(cl.text, cl.refs, registry);
+      if (bad.length) { rejected.push({ claimId: cl.id, reason: 'VALUE_NOT_IN_CITED_RECORD', values: bad }); continue; }
+    }
     accepted.push(cl);
   }
   return { ok: rejected.length === 0 && accepted.length > 0, accepted, rejected };
@@ -120,7 +165,7 @@ export function packHash(disputeId, evidenceType, claims) {
 
 // ---- Turn an approved pack into the PayPal provide-evidence input.
 export function toEvidencePayload(evidenceType, claims, { trackers = [], registry }) {
-  const notes = ('ProofPilot evidence pack. Each statement cites a PayPal record id.\n' +
+  const notes = ('ProofPilot evidence pack (PayPal sandbox test data). Each statement cites a PayPal record id.\n' +
     claims.map((c, i) => `${i + 1}. ${c.text} [${c.refs.map(r => `${r.type} ${r.id}`).join('; ')}]`).join('\n')).slice(0, 2000);
   const ev = { evidence_type: evidenceType, notes };
   if (evidenceType === 'PROOF_OF_FULFILLMENT') {

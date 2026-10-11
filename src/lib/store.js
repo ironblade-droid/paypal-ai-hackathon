@@ -15,6 +15,7 @@ export function createStore(file) {
   };
   return {
     data,
+    save,
     upsertOrder(id, patch) { data.orders[id] = { ...(data.orders[id] || { id }), ...patch, updatedAt: new Date().toISOString() }; save(); return data.orders[id]; },
     getOrder(id) { return data.orders[id]; },
     listOrders() { return Object.values(data.orders).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))); },

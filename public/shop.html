@@ -3,7 +3,7 @@
 <body><main>
 <div id="cfg"></div>
 <h1>Demo shop</h1>
-<p class="muted">A test store for the seller side of ProofPilot. Checkout uses the real PayPal JS SDK in sandbox. Orders are created and captured by our backend (Orders v2). Log in with a <b>sandbox buyer</b> account.</p>
+<p class="muted">A test store for the seller side of ProofPilot. Checkout uses the real PayPal JS SDK in sandbox. Orders are created and captured by our backend (Orders v2). Log in with a <b>sandbox buyer</b> account (card checkout is not enabled on this sandbox business account, so the card button is hidden).</p>
 <div class="products" id="products"></div>
 <div class="grid2" style="margin-top:16px">
   <div class="card"><h2>Checkout</h2><div id="selected" class="muted">Pick a product.</div><div id="paypal-buttons" style="margin-top:12px;max-width:380px"></div></div>
@@ -23,7 +23,7 @@ let selected = null;
     document.getElementById('selected').textContent = 'Selected: ' + products.find(p => p.sku === selected).name; };
   if (!cfg.credentials) return;
   const s = document.createElement('script');
-  s.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(cfg.clientId)}&currency=USD&intent=capture&components=buttons`;
+  s.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(cfg.clientId)}&currency=USD&intent=capture&components=buttons&disable-funding=card`;
   s.onload = () => paypal.Buttons({
     style: { layout: 'vertical', label: 'paypal' },
     createOrder: async () => { if (!selected) { alert('Pick a product first'); throw new Error('no product'); }

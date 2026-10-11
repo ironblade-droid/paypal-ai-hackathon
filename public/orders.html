@@ -6,7 +6,7 @@
 <h1>Orders & shipping</h1>
 <p class="muted">Before you ship, ProofPilot re-reads the order and capture from PayPal and flags anything that can void Seller Protection. Shipping adds tracking through PayPal Shipment Tracking, then reads the tracker back.</p>
 <div class="card"><label>Load a captured PayPal order by ID</label><input id="loadId" placeholder="e.g. 9H859131RH898413F" size="28"> <button class="sec" id="loadBtn">Load & check</button></div>
-<div id="grid" class="ag-theme-quartz" style="height:300px"></div>
+<div id="grid" class="ag-theme-quartz pp-grid" style="height:300px"></div>
 <div class="grid2" style="margin-top:16px">
  <div class="card"><h2>Ship order <span id="shipId" class="chip">select a row</span></h2>
   <label>Ship-to address (prefilled from the PayPal order; editing it simulates a buyer redirect)</label>
@@ -40,11 +40,11 @@ async function load() { grid.setGridOption('rowData', await PP.api('/api/orders'
     columnDefs: [
       { field: 'id', headerName: 'Order', width: 190 }, { field: 'sku', width: 100 },
       { headerName: 'Amount', valueGetter: p => p.data.amount ? `${p.data.amount.currency_code} ${p.data.amount.value}` : '', width: 120 },
-      { field: 'captureStatus', headerName: 'Capture', width: 120 },
+      { field: 'captureStatus', headerName: 'Payment', width: 120, valueFormatter: p => PP.h('capture', p.value) },
       { headerName: 'Seller Protection', valueGetter: p => p.data.sellerProtection?.status || '', width: 150 },
-      { headerName: 'Readiness', valueGetter: p => p.data.risk?.score ?? null, width: 110, cellStyle: p => ({ color: p.value == null ? '' : p.value >= 80 ? '#127a3d' : p.value >= 50 ? '#a15c00' : '#b3261e', fontWeight: 700 }) },
-      { headerName: 'Flags', valueGetter: p => (p.data.risk?.flags || []).filter(f => f.severity !== 'INFO').map(f => f.code).join(', '), flex: 1 },
-      { headerName: 'Tracking', valueGetter: p => p.data.tracking ? `${p.data.tracking.carrier} ${p.data.tracking.trackingNumber}` : '—', width: 200 },
+      { headerName: 'Ship readiness', valueGetter: p => p.data.risk?.score ?? null, width: 140, cellRenderer: PP.ReadinessRenderer },
+      { headerName: 'Flags', valueGetter: p => (p.data.risk?.flags || []).filter(f => f.severity !== 'INFO').map(f => f.code), flex: 1, cellRenderer: PP.ChipsRenderer, cellRendererParams: { kind: 'riskflag', empty: 'none' } },
+      { headerName: 'Tracking', valueGetter: p => p.data.tracking ? `${p.data.tracking.carrier} ${p.data.tracking.trackingNumber} (sandbox test data)` : '—', width: 240 },
     ],
     rowSelection: 'single', onRowClicked: e => fill(e.data), defaultColDef: { sortable: true, filter: true, resizable: true },
   });
