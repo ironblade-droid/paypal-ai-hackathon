@@ -6,7 +6,10 @@ export const order = { id: 'ORD123', status: 'COMPLETED', payer: { address: { co
   purchase_units: [{ amount: { currency_code: 'USD', value: '5.50' },
     shipping: { address: { address_line_1: '2211 N First St', admin_area_2: 'San Jose', admin_area_1: 'CA', postal_code: '95131', country_code: 'US' } },
     payments: { captures: [capture], refunds: [] } }] };
-export const tracker = { transaction_id: 'CAP123', tracking_number: '9400111899223197428490', carrier: 'USPS', status: 'SHIPPED' };
+// last_updated_time 2026-10-11T09:13:20Z: registered before the fixture dispute opened (09:22:26Z).
+export const tracker = { transaction_id: 'CAP123', tracking_number: '9400111899223197428490', carrier: 'USPS', status: 'SHIPPED', last_updated_time: '1791710000000' };
+// Registered 2026-10-11T10:31:48Z, after the fixture dispute opened.
+export const lateTracker = { transaction_id: 'CAP123', tracking_number: '9400111899562537866358', carrier: 'USPS', status: 'SHIPPED', last_updated_time: '1791714708929' };
 export const links = (...rels) => [{ rel: 'self', href: 'x', method: 'GET' }, ...rels.map(r => ({ rel: r, href: 'x/' + r, method: 'POST' }))];
 export function dispute(over = {}) {
   return { dispute_id: 'PP-D-1', create_time: '2026-10-11T09:22:26Z', reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED', status: 'WAITING_FOR_SELLER_RESPONSE',

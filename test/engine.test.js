@@ -38,7 +38,7 @@ test('evidence types come only from the dispute (current stage), never a fixed l
   assert.deepEqual(allowedEvidenceTypes(dispute({ status: 'UNDER_REVIEW', evidences: [] })), []);
 });
 
-function reg() { const r = makeRegistry(); r.add('dispute', 'PP-D-1', {}); r.add('capture', 'CAP123', capture); r.add('order', 'ORD123', order); r.add('tracker', 'CAP123-' + tracker.tracking_number, tracker); return r; }
+function reg() { const r = makeRegistry(); r.add('dispute', 'PP-D-1', dispute()); r.add('capture', 'CAP123', capture); r.add('order', 'ORD123', order); r.add('tracker', 'CAP123-' + tracker.tracking_number, tracker); return r; }
 
 test('checker refuses claims with no linked record or an unknown record', () => {
   const v = validateClaims([

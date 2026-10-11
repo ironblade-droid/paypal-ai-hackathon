@@ -50,7 +50,7 @@ export const rulesEngine = {
       return { ...base, action: 'ACCEPT', reasons };
     }
     if (can('make_offer')) { reasons.push('An offer can settle the case without a full refund. You set the amount.'); return { ...base, action: 'OFFER', reasons }; }
-    if (can('accept_claim')) { reasons.push('Without record-backed evidence, accepting avoids a likely loss plus time spent.'); return { ...base, action: 'ACCEPT', reasons }; }
+    if (can('accept_claim')) { reasons.push('ProofPilot has nothing record-backed to send for what PayPal asked. Accepting refunds the buyer and ends your work on the case; the choice is yours before the deadline.'); return { ...base, action: 'ACCEPT', reasons }; }
     return { ...base, action: 'WAIT', reasons: [...reasons, 'No suitable action is offered.'] };
   },
 };

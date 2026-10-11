@@ -26,17 +26,18 @@ const currentPack = () => type === 'SUPPORTING_INFO' ? A.supporting : A.packs[ty
 function renderAi() {
   const c = PP.cfg?.ai;
   if (!c?.configured) { aiCard.innerHTML = `<h2>AI advisor</h2><p class="muted">Not configured on this server: set <code>GEMINI_API_KEY</code> (Google Gemini) or <code>GROQ_API_KEY</code> (Groq) and restart. Until then the rules engine below makes the recommendation. No AI output is shown or simulated.</p>`; return; }
-  let body = `<h2>AI advisor <small>${PP.esc(c.label)}</small></h2><p class="muted">The model drafts a recommendation and the evidence narrative from the PayPal records below. Every sentence goes through the citation checker; anything that does not cite a real record, states a value not in that record, or predicts an outcome is refused. You approve before anything is sent.</p>`;
+  let body = `<h2>AI advisor <small>${PP.esc(c.label)}</small></h2><p class="muted">The model recommends an action and picks supporting facts by id. It does not write the evidence text: each fact is a sentence ProofPilot renders from fields of the PayPal records below. Any free text the model returns is refused unless it is exactly one of those facts. The checker confirms a fact is in the cited record; it cannot tell whether the fact helps your case. You tick and approve each sentence before anything is sent.</p>`;
   if (!AI) body += `<button id="askAi">Ask ${PP.esc(c.label)}</button>`;
   else if (!AI.ok) body += `<div class="banner err">The model call failed (${PP.esc(AI.error)}). Using the rules engine recommendation.</div><button class="sec" id="askAi">Try again</button>`;
   else {
     const r = AI.recommendation;
     body += `<h2>${PP.esc(r.action)}${r.evidenceType ? ` with ${PP.esc(PP.h('evidence', r.evidenceType))}` : ''} <small>(${r.source === 'llm' ? 'model' : 'rules fallback'}; ${AI.agreesWithRules ? 'agrees with' : 'differs from'} rules engine: ${PP.esc(AI.rules.action)})</small></h2>
       ${AI.flags.map(f => `<div class="gap">${PP.esc(f)}</div>`).join('')}
-      <b>Why</b>${AI.rationale.accepted.map(c => `<div class="claim">${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || '<div class="muted">No cited rationale sentence passed the checker.</div>'}
-      <b>Draft narrative for PayPal</b> <small>(tick to add to the evidence pack)</small>
+      <b>Facts behind the recommendation</b>${AI.rationale.accepted.map(c => `<div class="claim">${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || '<div class="muted">No reason the model gave passed the checker.</div>'}
+      <b>Facts the model suggests sending</b> <small>(rendered from PayPal record fields; tick to add to the pack)</small>
       ${AI.narrative.accepted.map(c => `<div class="claim"><input type="checkbox" class="aiPick" value="${PP.esc(c.id)}"> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || '<div class="muted">No drafted sentence passed the checker.</div>'}
-      ${[...AI.rationale.refused, ...AI.narrative.refused].map(x => `<div class="claim bad">Refused by checker (${PP.esc(x.reason)}${x.values ? ': ' + PP.esc(x.values.join(', ')) : ''}): ${PP.esc(x.text || x.claimId)}</div>`).join('')}
+      ${[...AI.rationale.refused, ...AI.narrative.refused].map(x => `<div class="claim bad">Refused by checker (${PP.esc(x.reason)}${x.values ? ': ' + PP.esc(x.values.join(', ')) : ''}): <s>${PP.esc(x.text || x.claimId)}</s></div>`).join('')}
+      ${AI.offerAmount ? `<div>Suggested offer: ${PP.esc(A.amount.currency_code)} ${PP.esc(AI.offerAmount)}</div>` : ''}
       <small>${PP.esc(AI.provider)} · ${PP.esc(AI.model)} · ${AI.ms ?? '?'} ms · ${new Date(AI.generatedAt).toLocaleTimeString()}${AI.cached ? ' (cached for this dispute version)' : ''}</small>
       <p><button class="sec" id="askAi">Regenerate</button></p>`;
   }
@@ -74,8 +75,10 @@ function render() {
      <div style="margin-top:8px">${p.validation.accepted.map(c => `<div class="claim"><input type="checkbox" class="cl" value="${PP.esc(c.id)}" checked> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('')}
      ${p.validation.rejected.map(x => `<div class="claim bad">Refused by checker: ${PP.esc(x.claimId)} (${PP.esc(x.reason)})</div>`).join('')}
      ${p.gaps.map(g => `<div class="gap">Gap: ${PP.esc(g.message)}</div>`).join('')}
+     ${(A.refusalRisks || []).filter(x => x.type === type).map(x => `<div class="gap">Warning: ${PP.esc(x.message)}</div>`).join('')}
+     ${(A.paypalRejected || []).some(r => r.type === type) ? `<div class="banner err">PayPal already refused ${PP.esc(PP.h('evidence', type))} on this dispute at this stage. ProofPilot will not send it again.</div>` : ''}
      ${type !== 'SUPPORTING_INFO' && !p.requirementMet ? `<div class="banner err">This pack lacks the record ${PP.esc(PP.h('evidence', type))} needs, so it cannot be submitted.</div>` : ''}</div>
-     <h2 style="margin-top:12px">Add your own statement</h2><small>The checker refuses any statement that does not cite a record ProofPilot fetched from PayPal.</small>
+     <h2 style="margin-top:12px">Add your own statement</h2><small>Your own wording. The checker confirms you cite a record ProofPilot fetched from PayPal and that any amount, date or id you write is in that record, and it refuses outcome predictions. It cannot confirm the rest of your sentence: that part is your statement and is sent as yours.</small>
      <div style="display:flex;gap:6px;margin-top:6px"><input id="ctext" placeholder="e.g. The buyer was emailed the tracking link" style="flex:1">
      <select id="cref"><option value="">(no record)</option>${A.records.map(x => `<option value="${PP.esc(x.type)}|${PP.esc(x.id)}">${PP.esc(x.type)} ${PP.esc(x.id)}</option>`).join('')}</select>
      <button class="sec" id="addBtn">Check & add</button></div><div id="custom"></div>`);
@@ -86,16 +89,16 @@ function render() {
     <button class="sec" id="reqEv">Sandbox: simulate PayPal requesting seller evidence</button> <span id="reqOut"></span></div>` : '';
   if (window.reqEv) reqEv.onclick = async () => { try { const r = await PP.api(`/api/sandbox/disputes/${encodeURIComponent(id)}/require-evidence`, { method: 'POST', body: {} });
     reqOut.textContent = `${r.before} → ${r.after}`; setTimeout(refresh, 2000); } catch (e) { reqOut.textContent = e.message; } };
-  records.innerHTML = `<h2>Records fetched from PayPal</h2><table class="simple"><tr><th>Type</th><th>ID</th><th>Note</th></tr>${A.records.map(x => `<tr><td>${PP.esc(x.type)}</td><td><span class="chip">${PP.esc(x.id)}</span></td><td><small>${x.note ? `<span class="testdata">${x.type === 'refund' ? 'not a seller refund' : 'test data'}</span> ` + PP.esc(x.note) : PP.esc(x.source)}</small></td></tr>`).join('')}</table>`;
+  records.innerHTML = `<h2>Records fetched from PayPal</h2><table class="simple"><tr><th>Type</th><th>ID</th><th>Note</th></tr>${A.records.map(x => `<tr><td>${PP.esc(x.type)}</td><td><span class="chip">${PP.esc(x.id)}</span></td><td><small>${x.note ? `<span class="testdata">${x.type === 'refund' ? 'not a seller refund' : /after dispute opened|no registration time/.test(x.note) ? 'added after dispute opened' : 'test data'}</span> ` + PP.esc(x.note) : PP.esc(x.source)}</small></td></tr>`).join('')}</table>`;
   histCard.innerHTML = `<h2>Case history (from PayPal)</h2><table class="simple"><tr><th>When</th><th>Who</th><th>What</th><th>Stage</th></tr>${A.history.map(h => `<tr><td>${new Date(h.date).toLocaleString()}</td><td>${PP.esc(PP.h('source', h.source))}</td><td>${PP.esc(h.action ? PP.h('action', h.action.toLowerCase()) : PP.h('evidence', h.type))}${h.action === 'PROVIDE_EVIDENCE' ? ` (${PP.esc(PP.h('evidence', h.type))})` : ''}</td><td>${PP.esc((PP.h('stage', h.stage) || '').split(' (')[0])}</td></tr>`).join('')}</table>`;
 }
 
-function drawCustom() { document.getElementById('custom').innerHTML = custom.map(c => `<div class="claim">${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join(''); }
+function drawCustom() { document.getElementById('custom').innerHTML = custom.map(c => `<div class="claim"><span class="testdata">your wording</span> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join(''); }
 async function addClaim() {
-  const [t, i] = (cref.value || '|').split('|'); const claim = { id: 'custom-' + (custom.length + 1), text: ctext.value, refs: t ? [{ type: t, id: i }] : [] };
+  const [t, i] = (cref.value || '|').split('|'); const claim = { id: 'custom-' + (custom.length + 1), text: ctext.value, refs: t ? [{ type: t, id: i }] : [], source: 'seller' };
   const v = await PP.api(`/api/disputes/${encodeURIComponent(id)}/check`, { method: 'POST', body: { claims: [claim] } });
   if (v.ok) { custom.push(claim); ctext.value = ''; drawCustom(); renderApprove(); }
-  else document.getElementById('custom').insertAdjacentHTML('beforeend', `<div class="claim bad">Refused: "${PP.esc(claim.text)}" (${PP.esc(v.rejected[0].reason)}). Link it to a PayPal record.</div>`);
+  else document.getElementById('custom').insertAdjacentHTML('beforeend', `<div class="claim bad">Refused: "${PP.esc(claim.text)}" (${PP.esc(v.rejected[0].reason)}${v.rejected[0].values ? ': ' + PP.esc(v.rejected[0].values.join(', ')) : ''}).</div>`);
 }
 function aiPicked() { const ids = [...document.querySelectorAll('.aiPick:checked')].map(x => x.value); return (AI?.narrative?.accepted || []).filter(c => ids.includes(c.id)); }
 function selectedClaims() { const p = currentPack(); const keep = [...document.querySelectorAll('.cl:checked')].map(x => x.value);
@@ -107,13 +110,14 @@ function renderApprove() {
   if (!A) return;
   const acts = A.status.actions; const p = type ? currentPack() : null;
   const evidenceAction = type === 'SUPPORTING_INFO' ? 'provide_supporting_info' : 'provide_evidence';
-  const canEvidence = p && acts.includes(evidenceAction) && (type === 'SUPPORTING_INFO' || p.requirementMet);
+  const refused = (A.paypalRejected || []).some(r => r.type === type);
+  const canEvidence = p && !refused && acts.includes(evidenceAction) && (type === 'SUPPORTING_INFO' || p.requirementMet);
   const n = p ? selectedClaims().claims.length : 0; const nAi = aiPicked().length;
   approve.innerHTML = `<h2>Approve and submit</h2>
-    ${canEvidence ? `<p>Send <b>${n}</b> cited statement(s)${nAi ? ` (${nAi} AI-drafted)` : ''} as <b>${PP.esc(PP.h('evidence', type))}</b> via <span class="chip">${evidenceAction}</span>. A PDF of the pack is attached.</p>` : `<p class="muted">Evidence submission is not available: ${p ? `PayPal does not offer ${PP.esc(PP.h('action', evidenceAction))} now${p.requirementMet || type === 'SUPPORTING_INFO' ? '' : ' and the pack is incomplete'}.` : 'no pack.'}</p>`}
+    ${canEvidence ? `<p>Send <b>${n}</b> cited statement(s)${nAi ? ` (${nAi} AI-drafted)` : ''} as <b>${PP.esc(PP.h('evidence', type))}</b> via <span class="chip">${evidenceAction}</span>. A PDF of the pack is attached.</p>` : `<p class="muted">Evidence submission is not available: ${p ? [!acts.includes(evidenceAction) ? `PayPal does not offer ${PP.esc(PP.h('action', evidenceAction))} now` : '', !(p.requirementMet || type === 'SUPPORTING_INFO') ? 'the pack is incomplete' : '', refused ? 'PayPal already refused this type here' : ''].filter(Boolean).join('; ') : 'no pack'}.</p>`}
     ${acts.includes('make_offer') ? `<p>Offer amount (${PP.esc(A.amount.currency_code)}): <input id="offerAmt" size="8" placeholder="${PP.esc(A.amount.value)}"></p>` : ''}
     ${canEvidence ? '<label><input type="checkbox" id="attachPdf" checked> Attach a PDF copy of the pack</label>' : ''}
-    ${(A.paypalRejected || []).map(r => `<div class="gap">PayPal rejected ${PP.esc(PP.h('evidence', r.type))} on this dispute at ${new Date(r.at).toLocaleTimeString()} (EVIDENCE_TYPE_IS_NOT_ALLOWED, debug_id ${PP.esc(r.debugId)}, PDF ${r.attachPdf ? 'attached' : 'not attached'}).</div>`).join('')}
+    ${(A.paypalRejected || []).map(r => `<div class="gap">PayPal rejected ${PP.esc(PP.h('evidence', r.type))} on this dispute ${r.at ? 'at ' + new Date(r.at).toLocaleString() : '(time not recorded)'} (EVIDENCE_TYPE_IS_NOT_ALLOWED, debug_id ${PP.esc(r.debugId)}; source: ${PP.esc(r.source || '')}).</div>`).join('')}
     <label>Type APPROVE to confirm you reviewed every statement</label><input id="conf" size="12">
     <p>${canEvidence ? '<button id="subEv">Submit to PayPal</button> ' : ''}${acts.includes('make_offer') ? '<button class="sec" id="subOffer">Make offer</button> ' : ''}${acts.includes('accept_claim') ? '<button class="sec" id="subAccept">Accept claim (refund)</button>' : ''}</p>
     <div id="out"></div>`;

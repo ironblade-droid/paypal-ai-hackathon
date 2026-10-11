@@ -19,10 +19,19 @@ ProofPilot checks an order for things that can void PayPal Seller Protection *be
 
 ### How submission is guarded
 1. The action must be one PayPal currently offers on the dispute (HATEOAS links).
-2. The evidence type must be one the dispute requests.
-3. Every claim must cite a record ProofPilot fetched from PayPal in this request (`NO_LINKED_RECORD` / `UNKNOWN_RECORD` otherwise).
-4. The type's required record must be present (a tracker for `PROOF_OF_FULFILLMENT`, a completed refund for `PROOF_OF_REFUND`).
+2. The evidence type must be one the dispute requests, and not one PayPal already refused on this dispute at this stage (`TYPE_REFUSED_BY_PAYPAL`, see below).
+3. What the checker verifies, and what it does not:
+   - Every statement must cite a record ProofPilot fetched from PayPal in this request (`NO_LINKED_RECORD` / `UNKNOWN_RECORD`).
+   - Any amount (`USD 5.50`, `$9`, `550 USD`), date (`2026-10-01`, `October 1`, `1 Oct 2026`, `10/01/2026`) or id (any letter case) in the sentence must appear in the cited record (`VALUE_NOT_IN_CITED_RECORD`).
+   - No text after the last citation (`TEXT_AFTER_CITATION`), and a new sentence always needs its own citation, even if it starts in lowercase.
+   - Wording that predicts or describes a case outcome is refused (`OUTCOME_CLAIM`). This is a pattern list, so it catches common phrasings, not every possible one.
+   - A tracker registered after the dispute opened cannot be cited as shipment proof (`LATE_TRACKING`).
+   - ProofPilot's own pack statements and the AI's are rendered from record fields (see "How the AI is kept honest"). A statement you type yourself is marked "Seller's own statement" in what PayPal receives: the checker verifies its citation and values, not the rest of your wording.
+4. The type's required record must be present: a tracker registered **before** the dispute opened for `PROOF_OF_FULFILLMENT` (later tracking is labelled "added after dispute opened" and not used as proof of shipment), a completed seller refund for `PROOF_OF_REFUND`.
 5. The pack hash you approved must match the pack being sent (`PACK_CHANGED` otherwise), and you must send `approved: true, confirm: "APPROVE"`.
+
+### PayPal refusals are remembered
+When PayPal answers `EVIDENCE_TYPE_IS_NOT_ALLOWED`, ProofPilot stores the type, stage and debug id. Refusals seen in the team sandbox are committed in `seed/paypal-refusals.json`, so a fresh install or the hosted demo knows them too. While the dispute is in that stage, neither the rules engine nor the AI advisor recommends that type, and the submit route refuses to send it. ProofPilot also reads the dispute's own history: if a type you already sent at an earlier stage is requested again, it shows a warning, because that is the pattern PayPal refused in the sandbox.
 
 ## Tools used (AI and PayPal)
 | Tool | How ProofPilot uses it | Status in this build |
@@ -33,12 +42,14 @@ ProofPilot checks an order for things that can void PayPal Seller Protection *be
 | PayPal Orders v2, Payments v2, Shipment Tracking, Disputes v1, Webhooks, JS SDK | See the table above. | Live in sandbox |
 | AG Grid Community 32 | Dispute queue and orders grids with a custom theme and cell renderers (status chips, live deadline countdown, evidence chips, readiness bars). No Enterprise features. | Live |
 
-### How the AI is kept honest
-1. The model only sees digests of records ProofPilot fetched from PayPal (no buyer or seller emails or names) and must end every sentence with inline citations like `[capture:1AU666173Y707472F]`.
-2. Each sentence is checked on its own by the citation checker in strict mode. It is refused if it cites nothing (`NO_LINKED_RECORD`), cites a record that was not fetched (`UNKNOWN_RECORD`), states an amount or id that is not in the cited record (`VALUE_NOT_IN_CITED_RECORD`), or predicts an outcome (`OUTCOME_CLAIM`). Refused sentences are shown, struck out, with the reason.
-3. The model's action must be one PayPal currently offers; its evidence type must be one the dispute requests. A FIGHT without a complete cited pack is replaced by the rules engine's answer, and the UI shows whether the model agrees with the rules engine.
-4. AI-drafted sentences the seller ticks are re-checked on the server at submit time, and the seller must approve the exact pack (hash-bound).
-5. With no key, the UI says "AI not configured" and shows only the rules engine. No AI output is ever simulated.
+### How the AI is kept honest (structured claims)
+1. ProofPilot renders a catalog of facts from fields of the records it fetched from PayPal, for example `capture:<id>:amount` → "The buyer paid USD 5.50." The model sees record digests (no buyer or seller emails or names) and this catalog.
+2. The model returns an action, an evidence type and **fact ids** (`rationale_facts`, `narrative_facts`). It does not write the evidence text: ProofPilot does, from record data. Unknown fact ids are refused (`UNKNOWN_FACT`).
+3. If the model returns free-text sentences instead, each one is checked in strict mode and passes only if it is exactly one of the catalog facts with the matching citation (`NOT_A_RECORDED_FACT` otherwise), after the citation, value, outcome and late-tracking checks above. Refused sentences are shown struck out with the reason. In the 18 adversarial cases from the v0.2 review (`test/adversarial.test.js`), all 17 fabricated or misleading sentences are refused and the true control sentence is accepted.
+4. The model's action must be one PayPal offers; its evidence type must be requested and not refused by PayPal; a FIGHT needs a complete pack; a recommendation with no reason that passes the checker falls back to the rules engine; an offer amount is only kept with OFFER and at most the disputed amount. The UI shows whether the model agrees with the rules engine.
+5. At submit time the server re-checks every statement that is not one of ProofPilot's own pack statements and not marked as your own wording: it must be a catalog fact. This does not depend on the claim's id or on the browser saying it came from the model.
+6. Limits: the checker proves that a fact is in a PayPal record, not that the fact helps your case or that the record is right. You still tick and approve each statement.
+7. With no key, the UI says "AI not configured" and shows only the rules engine. No AI output is ever simulated.
 
 ## Run it
 

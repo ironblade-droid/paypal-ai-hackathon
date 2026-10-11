@@ -7,8 +7,10 @@ fail=0
 files=$(git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f -not -path './node_modules/*' -not -path './.git/*')
 
 if command -v gitleaks >/dev/null 2>&1; then
-  echo "== gitleaks (working tree + history)"
-  gitleaks detect --source . --no-banner --redact || fail=1
+  echo "== gitleaks: all git history (config .gitleaks.toml)"
+  gitleaks detect --source . --log-opts=--all --no-banner --redact || fail=1
+  echo "== gitleaks: working tree incl. uncommitted files"
+  gitleaks detect --source . --no-git --no-banner --redact || fail=1
 else
   echo "== gitleaks not installed; pattern scan only"
 fi

@@ -1,0 +1,11 @@
+# gitleaks config: default rules plus a narrow allowlist for the fake placeholder keys used by the mocked AI
+# provider tests (test/ai.test.js). These strings are not credentials and never reach a real API.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholder API keys in mocked AI tests"
+regexes = [
+  '''\b(gem|groq)-test-key-123456\b''',
+  '''\b[gq]-key-1234567890\b''',
+]

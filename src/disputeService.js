@@ -1,6 +1,7 @@
 // Dispute analysis: live PayPal reads -> status, deadline, allowed evidence types, cited packs, recommendation.
 import { adviseWithLlm } from './ai/advisor.js';
 import { allowedEvidenceTypes, gatherRecords, buildPack, validateClaims, packHash, toEvidencePayload, packPdf, meetsRequirement } from './engine/evidence.js';
+import { refusalsFor, derivedRefusalRisks } from './lib/refusals.js';
 import { describeStatus, deadline, sellerActions, sandboxSimLinks } from './engine/status.js';
 
 export async function analyseDispute({ api, store, engine }, id) {
@@ -24,7 +25,8 @@ export async function analyseDispute({ api, store, engine }, id) {
     p.hash = packHash(dispute.dispute_id, 'SUPPORTING_INFO', p.validation.accepted);
     supporting = p;
   }
-  const paypalRejected = (store.data.rejectedTypes?.[id] || []).filter(r => Date.parse(r.at) >= Date.parse(dispute.update_time || 0));
+  const paypalRejected = refusalsFor(dispute, store);
+  const refusalRisks = derivedRefusalRisks(dispute);
   const recommendation = engine.recommend({ dispute, allowedTypes, packs, acceptBelow: engine.acceptBelow || 0, rejectedTypes: [...new Set(paypalRejected.map(r => r.type))] });
   const txn = dispute.disputed_transactions?.[0] || {};
   return {
@@ -33,7 +35,7 @@ export async function analyseDispute({ api, store, engine }, id) {
     status, sandboxLinks: sandboxSimLinks(dispute), deadline: deadline(dispute), allowedTypes, packs, supporting, recommendation,
     transaction: { buyerTxn: txn.buyer_transaction_id, sellerTxn: txn.seller_transaction_id, protectionEligible: txn.seller_protection_eligible, protectionType: txn.seller_protection_type },
     records: recs.registry.list(), gaps: recs.gaps, trackers: recs.trackers,
-    paypalRejected,
+    paypalRejected, refusalRisks,
     history: (dispute.evidences || []).map(e => ({ type: e.evidence_type, source: e.source, stage: e.dispute_life_cycle_stage, date: e.date, action: e.action_info?.action, notes: e.notes })),
     _ctx: { dispute, recs },
   };
@@ -55,16 +57,22 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
     const type = action === 'provide_evidence' ? body.evidenceType : 'SUPPORTING_INFO';
     if (action === 'provide_evidence' && !a.allowedTypes.includes(type))
       throw new SubmitError('TYPE_NOT_REQUESTED', `Evidence type ${type} is not requested by this dispute. Requested: ${a.allowedTypes.join(', ') || 'none'}.`);
+    if (action === 'provide_evidence' && a.paypalRejected.some(r => r.type === type) && body.retryRefusedType !== true)
+      throw new SubmitError('TYPE_REFUSED_BY_PAYPAL', `PayPal already refused ${type} on this dispute at this stage (EVIDENCE_TYPE_IS_NOT_ALLOWED). ProofPilot does not send it again.`, { refusals: a.paypalRejected });
     const pack = action === 'provide_evidence' ? a.packs[type] : a.supporting;
     // Seller may drop claims or add their own; custom claims must cite a fetched record or they are refused.
     const base = pack.validation.accepted.filter(c => !body.excludeClaimIds?.includes(c.id));
-    const claims = [...base, ...(body.customClaims || []).map((c, i) => ({ id: c.id || `custom-${i + 1}`, text: c.text, refs: c.refs }))];
+    const claims = [...base, ...(body.customClaims || []).map((c, i) => ({ id: c.id || `custom-${i + 1}`, text: c.text, refs: c.refs, ...(c.source === 'seller' ? { source: 'seller' } : {}) }))];
     const v = validateClaims(claims, a._ctx.recs.registry);
-    if (!v.ok) throw new SubmitError('UNCITED_CLAIMS', 'The checker refused claims without a linked PayPal record.', { rejected: v.rejected });
-    // AI-drafted sentences get the strict check again on the server (cited values must exist in the cited record, no outcome claims).
-    const aiCheck = validateClaims(claims.filter(c => String(c.id).startsWith('ai')), a._ctx.recs.registry, { strict: true });
-    if (aiCheck.rejected.length) throw new SubmitError('UNCITED_CLAIMS', 'The checker refused AI-drafted sentences.', { rejected: aiCheck.rejected });
-    if (action === 'provide_evidence' && !meetsRequirement(type, v.accepted)) throw new SubmitError('REQUIREMENT_NOT_MET', `The pack does not contain the record ${type} needs.`, { gaps: pack.gaps });
+    if (!v.ok) throw new SubmitError('UNCITED_CLAIMS', 'The checker refused claims: each needs a linked PayPal record, and amounts, dates and ids must be in it.', { rejected: v.rejected });
+    // Anything that is not one of ProofPilot's own pack claims and not marked as the seller's own wording (source:'seller')
+    // must be exactly a fact rendered from the cited records: this covers AI sentences whatever their id, and the server
+    // does not trust the client's word that a sentence came from the model.
+    const builtIn = new Set(pack.validation.accepted.map(c => `${c.text}|${JSON.stringify(c.refs)}`));
+    const mustBeFact = claims.filter(c => !builtIn.has(`${c.text}|${JSON.stringify(c.refs)}`) && c.source !== 'seller');
+    const factCheck = validateClaims(mustBeFact, a._ctx.recs.registry, { strict: true });
+    if (factCheck.rejected.length) throw new SubmitError('UNCITED_CLAIMS', 'The checker refused sentences that are not facts rendered from the cited PayPal records.', { rejected: factCheck.rejected });
+    if (action === 'provide_evidence' && !meetsRequirement(type, v.accepted, a._ctx.recs.registry)) throw new SubmitError('REQUIREMENT_NOT_MET', `The pack does not contain the record ${type} needs.`, { gaps: pack.gaps });
     const hash = packHash(a.id, type, v.accepted);
     if (body.packHash !== hash) throw new SubmitError('PACK_CHANGED', 'The pack differs from what you approved. Review it again.', { expected: hash });
     const { input, notes } = toEvidencePayload(type, v.accepted, { trackers: a.trackers, registry: a._ctx.recs.registry });
@@ -89,7 +97,7 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
   catch (e) {
     if (e.issue === 'EVIDENCE_TYPE_IS_NOT_ALLOWED' && body.evidenceType) {
       store.data.rejectedTypes = store.data.rejectedTypes || {};
-      (store.data.rejectedTypes[id] ||= []).push({ type: body.evidenceType, at: new Date().toISOString(), debugId: e.debugId, attachPdf: body.attachPdf !== false });
+      (store.data.rejectedTypes[id] ||= []).push({ type: body.evidenceType, stage: a.stage, issue: e.issue, at: new Date().toISOString(), debugId: e.debugId, attachPdf: body.attachPdf !== false });
       store.save();
     }
     store.audit({ type: 'SUBMIT_REJECTED_BY_PAYPAL', disputeId: id, action, evidenceType: body.evidenceType, issue: e.issue, debugId: e.debugId });
@@ -108,7 +116,7 @@ export async function aiAdvice({ api, store, engine, llm }, id, { refresh = fals
   const key = `${id}|${a.updateTime}|${llm?.model || 'none'}`;
   if (!refresh && aiCache.has(key)) return { ...aiCache.get(key), cached: true };
   const out = await adviseWithLlm(llm, { dispute: a._ctx.dispute, allowedTypes: a.allowedTypes, actions: a.status.actions,
-    registry: a._ctx.recs.registry, packs: a.packs, rules: a.recommendation });
+    registry: a._ctx.recs.registry, packs: a.packs, rules: a.recommendation, rejectedTypes: [...new Set(a.paypalRejected.map(r => r.type))] });
   if (out.ok) aiCache.set(key, out);
   if (out.available) store.audit({ type: 'AI_ADVICE', disputeId: id, provider: out.provider, model: out.model, ok: out.ok,
     action: out.recommendation?.action, refused: (out.narrative?.refused?.length || 0) + (out.rationale?.refused?.length || 0) });

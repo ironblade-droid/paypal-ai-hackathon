@@ -60,33 +60,42 @@ test('sentence parser keeps "5.50" intact and reads inline citations per sentenc
   assert.deepEqual(s[1].refs, []);
 });
 
-test('every AI sentence must pass the checker: uncited, fake record, invented value and outcome claims are refused', async () => {
+test('structured claims: picked fact ids are rendered from record fields; free text passes only if it is exactly a fact', async () => {
   const r = await adviseWithLlm(mock({ action: 'FIGHT', evidence_type: 'PROOF_OF_FULFILLMENT',
-    rationale: ['PayPal asked for proof of fulfillment and a tracker is registered [dispute:PP-D-1][tracker:' + TR + '].'],
+    rationale_facts: ['dispute:PP-D-1:requested', `tracker:${TR}:shipped`],
+    narrative_facts: ['capture:CAP123:amount', `tracker:${TR}:shipped`, 'capture:CAP123:invented-field'],
     narrative: [
+      'The buyer paid USD 5.50 [capture:CAP123].',
       'The order was paid in full, USD 5.50 [capture:CAP123].',
-      `The parcel was shipped with USPS under tracking ${tracker.tracking_number} [tracker:${TR}].`,
       'The buyer confirmed delivery by phone.',
       'Delivery was confirmed by the courier [tracker:FAKE-1].',
       'The buyer was refunded USD 9.99 [capture:CAP123].',
       'This case will be won by the seller [dispute:PP-D-1].'] }), ctx());
   assert.equal(r.ok, true); assert.equal(r.recommendation.action, 'FIGHT'); assert.equal(r.recommendation.source, 'llm'); assert.equal(r.agreesWithRules, true);
-  assert.equal(r.narrative.accepted.length, 2);
-  assert.deepEqual(r.narrative.refused.map(x => x.reason), ['NO_LINKED_RECORD', 'UNKNOWN_RECORD', 'VALUE_NOT_IN_CITED_RECORD', 'OUTCOME_CLAIM']);
-  assert.deepEqual(r.narrative.refused[2].values, ['9.99']);
-  assert.equal(r.rationale.accepted.length, 1);
-  assert.match(mock.last.system, /\[type:id\]/); assert.match(mock.last.user, /"requested_evidence_types"/);
+  assert.deepEqual(r.narrative.accepted.map(c => c.factId), ['capture:CAP123:amount', `tracker:${TR}:shipped`, 'capture:CAP123:amount']);
+  assert.equal(r.narrative.accepted[1].text, `Shipped with USPS, tracking ${tracker.tracking_number}, registered with PayPal (status SHIPPED) [sandbox test tracking number, no real parcel].`);
+  assert.deepEqual(r.narrative.refused.map(x => x.reason), ['UNKNOWN_FACT', 'NOT_A_RECORDED_FACT', 'NO_LINKED_RECORD', 'UNKNOWN_RECORD', 'VALUE_NOT_IN_CITED_RECORD', 'OUTCOME_CLAIM']);
+  assert.equal(r.rationale.accepted.length, 2);
+  assert.match(mock.last.system, /\[type:id\]/); assert.match(mock.last.user, /"requested_evidence_types"/); assert.match(mock.last.user, /"facts"/);
   assert.doesNotMatch(mock.last.user, /example\.com|@/, 'no emails sent to the model');
 });
 
+test('model may not pick a type PayPal refused; no checkable reason means rules fallback', async () => {
+  const a = await adviseWithLlm(mock({ action: 'FIGHT', evidence_type: 'PROOF_OF_FULFILLMENT', rationale_facts: ['capture:CAP123:amount'] }), ctx({ rejectedTypes: ['PROOF_OF_FULFILLMENT'] }));
+  assert.ok(a.flags.some(f => /already refused/.test(f))); assert.equal(a.recommendation.source, 'rules-fallback');
+  assert.match(mock.last.user, /"refused_by_paypal": \[\n\s+"PROOF_OF_FULFILLMENT"/);
+  const b = await adviseWithLlm(mock({ action: 'ACCEPT', rationale: ['Accepting is cheapest [dispute:PP-D-1].'] }), ctx());
+  assert.equal(b.recommendation.source, 'rules-fallback'); assert.ok(b.flags.some(f => /no reason/.test(f)));
+});
+
 test('sanity checks: action not offered, type not requested, FIGHT without complete pack -> rules fallback', async () => {
-  const a = await adviseWithLlm(mock({ action: 'OFFER', narrative: [] }), ctx());
+  const a = await adviseWithLlm(mock({ action: 'OFFER', narrative: [], rationale_facts: ['capture:CAP123:amount'] }), ctx());
   assert.equal(a.recommendation.source, 'rules-fallback'); assert.match(a.flags[0], /does not offer make_offer/);
   const b = await adviseWithLlm(mock({ action: 'FIGHT', evidence_type: 'OTHER', narrative: [] }), ctx());
   assert.ok(b.flags.some(f => /does not request/.test(f))); assert.equal(b.recommendation.source, 'rules-fallback');
   const c = await adviseWithLlm(mock({ action: 'FIGHT', evidence_type: 'PROOF_OF_FULFILLMENT' }), ctx({ packs: { PROOF_OF_FULFILLMENT: { requirementMet: false, validation: { ok: true } } } }));
   assert.ok(c.flags.some(f => /Sanity check/.test(f)));
-  const d = await adviseWithLlm(mock({ action: 'ACCEPT', narrative: [] }), ctx());
+  const d = await adviseWithLlm(mock({ action: 'ACCEPT', narrative: [], rationale_facts: ['dispute:PP-D-1:amount'] }), ctx());
   assert.equal(d.recommendation.action, 'ACCEPT'); assert.equal(d.agreesWithRules, false);
 });
 
@@ -101,16 +110,22 @@ test('system prompt forbids outcome predictions and requires citations', () => {
 });
 
 test('app: /ai route uses the configured provider; AI sentences are re-checked strictly on submit', async () => {
-  const llm = mock({ action: 'FIGHT', evidence_type: 'PROOF_OF_FULFILLMENT', rationale: [], narrative: ['The order was paid, USD 5.50 [capture:CAP123].'] });
+  const llm = mock({ action: 'FIGHT', evidence_type: 'PROOF_OF_FULFILLMENT', rationale_facts: ['capture:CAP123:amount'], narrative_facts: ['capture:CAP123:amount'] });
   const app = createApp({ api: fakeApi(), store: createStore(null), engine: rulesEngine, config: { dryRun: true }, llm });
   const s = await new Promise(r => { const x = app.listen(0, () => r(x)); }); const base = `http://127.0.0.1:${s.address().port}`;
   const post = async (p, b) => (await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) })).json();
   const cfg = await (await fetch(base + '/api/config')).json();
   assert.deepEqual(cfg.ai, { configured: true, provider: 'mock', model: 'mock-model', label: 'Mock (tests only)' });
   const ai = await post('/api/disputes/PP-D-1/ai', {});
-  assert.equal(ai.ok, true); assert.equal(ai.narrative.accepted[0].id, 'ai-1');
-  const bad = await post('/api/disputes/PP-D-1/submit', { action: 'provide_evidence', evidenceType: 'PROOF_OF_FULFILLMENT', approved: true, confirm: 'APPROVE', packHash: 'x',
-    customClaims: [{ id: 'ai-9', text: 'Refunded USD 1.23 already.', refs: [{ type: 'capture', id: 'CAP123' }] }] });
+  assert.equal(ai.ok, true); assert.equal(ai.narrative.accepted[0].id, 'ai-1'); assert.equal(ai.narrative.accepted[0].text, 'The buyer paid USD 5.50.');
+  const sub = (customClaims) => post('/api/disputes/PP-D-1/submit', { action: 'provide_evidence', evidenceType: 'PROOF_OF_FULFILLMENT', approved: true, confirm: 'APPROVE', packHash: 'x', customClaims });
+  const bad = await sub([{ id: 'ai-9', text: 'Refunded USD 1.23 already.', refs: [{ type: 'capture', id: 'CAP123' }] }]);
   assert.equal(bad.error, 'UNCITED_CLAIMS'); assert.equal(bad.rejected[0].reason, 'VALUE_NOT_IN_CITED_RECORD');
+  // Not keyed on the id prefix: any sentence that is not a built-in claim or marked as the seller's wording must be a fact.
+  const sneaky = await sub([{ id: 'x-1', text: 'The buyer admitted receiving it.', refs: [{ type: 'dispute', id: 'PP-D-1' }] }]);
+  assert.equal(sneaky.error, 'UNCITED_CLAIMS'); assert.equal(sneaky.rejected[0].reason, 'NOT_A_RECORDED_FACT');
+  // An AI fact passes the server check (then fails only on the pack hash, which the UI computes).
+  const fact = await sub([ai.narrative.accepted[0]]);
+  assert.equal(fact.error, 'PACK_CHANGED');
   s.close();
 });

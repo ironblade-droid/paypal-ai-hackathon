@@ -1,0 +1,10 @@
+{
+  "_about": "PayPal evidence-type refusals observed in the team sandbox. Committed so a fresh install, the hosted demo and the video never recommend a type PayPal already refused on that dispute. Sandbox test data only.",
+  "refusals": [
+    { "disputeId": "PP-R-PGV-10190981", "type": "PROOF_OF_FULFILLMENT", "stage": "CHARGEBACK", "issue": "EVIDENCE_TYPE_IS_NOT_ALLOWED", "debugId": "ca48d2e001e25", "at": null, "note": "First app submission, 11 Oct 2026 between 15:57:52 and 16:01:35 IST; refusal time was not stored (refusal logging was added after this attempt)." },
+    { "disputeId": "PP-R-PGV-10190981", "type": "PROOF_OF_FULFILLMENT", "stage": "CHARGEBACK", "issue": "EVIDENCE_TYPE_IS_NOT_ALLOWED", "debugId": "f951841e0bc57", "at": null, "note": "Second app submission, same window; time not stored." },
+    { "disputeId": "PP-R-PGV-10190981", "type": "PROOF_OF_FULFILLMENT", "stage": "CHARGEBACK", "issue": "EVIDENCE_TYPE_IS_NOT_ALLOWED", "debugId": "f563062b0c644", "at": "2026-10-11T10:31:35.164Z", "note": "No PDF attached." },
+    { "disputeId": "PP-R-PGV-10190981", "type": "PROOF_OF_FULFILLMENT", "stage": "CHARGEBACK", "issue": "EVIDENCE_TYPE_IS_NOT_ALLOWED", "debugId": "f942795438d28", "at": "2026-10-11T10:32:04.280Z", "note": "PDF attached." },
+    { "disputeId": "PP-R-PGV-10190981", "type": "PROOF_OF_FULFILLMENT", "stage": "CHARGEBACK", "issue": "EVIDENCE_TYPE_IS_NOT_ALLOWED", "debugId": "f555810c4f27c", "at": "2026-10-11T10:33:14.577Z", "note": "PDF attached, only the newly registered tracker cited." }
+  ]
+}

@@ -12,20 +12,22 @@ Everything here is PayPal **sandbox** test data.
 ## Seeded data (what already exists in the team sandbox)
 - Dispute `PP-R-PGV-10190981`: item not received, USD 5.50, created through the API on 11 Oct 2026 by the spike (buyer consent + buyer-side transaction id `77W70831A6213602F`).
 - Order `9H859131RH898413F`, capture `1AU666173Y707472F` (Seller Protection eligible).
-- Trackers on that capture: `9400100000000000000001` (registered by the spike's evidence submission) and `9400111899562537866358` (added through ProofPilot's Ship flow on 11 Oct 2026). Both are sandbox test numbers.
+- Trackers on that capture: `9400100000000000000001` (registered by the spike's evidence submission) and `9400111899562537866358` (added through ProofPilot's Ship flow on 11 Oct 2026). Both are sandbox test numbers and both were added after the dispute opened, so ProofPilot labels them "added after dispute opened" and does not use them as proof of shipment.
 - Refund-type record `44V27761ED882372G` (USD 4.82, PENDING): this is PayPal's dispute hold (it matches the dispute's `HOLD_PLACED` fund movement to the second), not a refund the seller issued.
 
 ## Seeding a fresh dispute (for a clean video run)
 1. Shop: buy the USD 5.50 sticker pack with the sandbox buyer (browser approval needed).
-2. Orders & shipping: run the pre-ship check, add tracking.
+2. Orders & shipping: run the pre-ship check and add tracking **before** the buyer opens the dispute. Tracking added after the dispute opened is labelled "added after dispute opened" and is not used as proof of shipment.
 3. Open the dispute as the buyer: buyer Resolution Center, or `POST /api/sandbox/disputes` with the buyer email and the **buyer-side** transaction id from the buyer's Activity page (needs the buyer's one-time *Log in with PayPal* consent for the app).
 4. Open the dispute in ProofPilot: it shows **Waiting for PayPal** and polls until PayPal offers actions (about 3 to 5 minutes; start this before recording).
 5. In the inquiry stage PayPal requested proof of fulfillment and accepted it in the spike; submit from the dispute page.
 
 ## Sandbox notes from live runs (11 Oct 2026, IST)
 - 15:57: `require-evidence` (sandbox only) was called on `PP-R-PGV-10190981` from ProofPilot's sandbox tool. About 20 s later PayPal moved the case from **Under PayPal review** to **Your response needed** (claim stage), requesting proof of fulfillment, proof of refund and a delivery signature, due 15 Oct 2026 09:29 IST.
-- 15:58 to 16:03: four seller submissions of proof of fulfillment through the approve-and-submit flow were refused by PayPal with `EVIDENCE_TYPE_IS_NOT_ALLOWED` (PayPal debug ids ca48d2e001e25, f951841e0bc57, f563062b0c644, f942795438d28, f555810c4f27c), with and without the PDF, and with only a freshly registered tracking number. The dispute state did not change. ProofPilot now records the refusal and stops recommending that type for the case.
+- 15:58 to 16:03: **five** seller submissions of proof of fulfillment through the approve-and-submit flow were refused by PayPal with `EVIDENCE_TYPE_IS_NOT_ALLOWED`. PayPal debug ids: ca48d2e001e25 and f951841e0bc57 (the first two; their exact times were not stored because refusal logging was added after them), then f563062b0c644 (16:01:35, no PDF), f942795438d28 (16:02:04, PDF) and f555810c4f27c (16:03:14, PDF, only the newly registered tracker). The dispute state did not change.
+- All five are in the committed `seed/paypal-refusals.json`, so a fresh install or the hosted demo also knows that PayPal refused proof of fulfillment on this case at the claim stage: the rules engine and the AI advisor do not recommend it and the submit route refuses to send it again (`TYPE_REFUSED_BY_PAYPAL`).
+- Both trackers on this capture were registered after the dispute opened (09:30:48 UTC by the spike's evidence submission and 10:31:48 UTC by ProofPilot's Ship flow; the case opened 09:22:26 UTC). ProofPilot v0.3 labels them "added after dispute opened" and does not use them as proof of shipment, so this dispute has no complete proof-of-fulfillment pack anyway.
 - `adjudicate` is never called.
 
 ## Screenshots (`docs/screenshots/`)
-01 queue under review · 02 dispute under review · 03 sandbox require-evidence clicked · 04 queue, response needed · 05 dispute, response needed · 06 evidence pack · 06b checker refuses an uncited claim · 07 approve before submit · 08 submit refused by PayPal (EVIDENCE_TYPE_IS_NOT_ALLOWED) · 09 dispute after refusal, still response needed · 10 queue after refusal · 11 orders & shipping · 12 demo shop.
+01 queue under review · 02 dispute under review · 03 sandbox require-evidence clicked · 04 queue, response needed · 05 dispute, response needed · 06 evidence pack · 06b checker refuses an uncited claim · 07 approve before submit · 08 submit refused by PayPal (EVIDENCE_TYPE_IS_NOT_ALLOWED) · 09 dispute after refusal, still response needed · 10 queue after refusal · 11 orders & shipping · 12 demo shop · 13 fresh install (dry run, empty local store): the seeded PayPal refusals and the "added after dispute opened" tracker labels are shown, and proof of fulfillment is not offered for submission.
