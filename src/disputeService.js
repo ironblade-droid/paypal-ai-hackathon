@@ -2,6 +2,8 @@
 import { adviseWithLlm } from './ai/advisor.js';
 import { runAgent } from './ai/agent.js';
 import { allowedEvidenceTypes, gatherRecords, buildPack, validateClaims, packHash, toEvidencePayload, packPdf, meetsRequirement } from './engine/evidence.js';
+import { bindProposal, proposalHash, issueToken, tokenDigest, TEMPLATES } from './ai/proposals.js';
+import { checkAmountWithin } from './lib/money.js';
 import { refusalsFor, derivedRefusalRisks } from './lib/refusals.js';
 import { describeStatus, deadline, sellerActions, sandboxSimLinks } from './engine/status.js';
 
@@ -82,12 +84,13 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
     payloadPreview = action === 'provide_evidence' ? input : { notes };
     call = () => action === 'provide_evidence' ? api.provideEvidence(id, input, files) : api.provideSupportingInfo(id, notes, files);
   } else if (action === 'accept_claim') {
-    payloadPreview = { note: body.note || 'Seller accepted the claim via ProofPilot.' };
+    // Notes sent to PayPal are ProofPilot templates; free text from the request is not forwarded.
+    payloadPreview = { note: TEMPLATES.acceptNote(a.id) };
     call = () => api.acceptClaim(id, payloadPreview.note);
   } else if (action === 'make_offer') {
-    const v = Number(body.offerAmount);
-    if (!(v > 0) || v > Number(a.amount.value)) throw new SubmitError('BAD_OFFER', 'Offer amount must be above 0 and at most the disputed amount.');
-    payloadPreview = { note: body.note || 'Seller offer via ProofPilot.', amount: { currency_code: a.amount.currency_code, value: v.toFixed(2) } };
+    const c = checkAmountWithin({ value: body.offerAmount, currency_code: body.offerCurrency ?? a.amount.currency_code }, { currency: a.amount.currency_code, max: a.amount.value });
+    if (!c.ok) throw new SubmitError('BAD_OFFER', `Offer must be a plain amount of at least 0.01 and at most the disputed ${a.amount.currency_code} ${a.amount.value}, in ${a.amount.currency_code}.`, { reason: c.reason });
+    payloadPreview = { note: TEMPLATES.offerNote(a.id), amount: { currency_code: a.amount.currency_code, value: c.value } };
     call = () => api.makeOffer(id, payloadPreview);
   } else throw new SubmitError('UNSUPPORTED_ACTION', `ProofPilot does not submit ${action}.`);
 
@@ -128,9 +131,17 @@ export async function aiAdvice({ api, store, engine, llm, agentTools }, id, { re
     out = await runAgent({ provider: llm, rawTools: typeof agentTools === 'function' ? agentTools() : agentTools, ctx, generateTextImpl: agentTools.generateTextImpl });
     const held = out._held || {}; delete out._held;
     const props = out.agent?.proposals || [];
-    for (const p of props) if (held[p.tool]) heldWrites.set(p.id, { tool: p.tool, args: p.args, execute: held[p.tool] });
+    // A pending, executable proposal gets a server-issued single-use approval token bound to its id, hash and dispute.
+    // Only the digest is stored with the proposal; the token itself stays in server memory and is shown to the seller
+    // through the passcode-guarded agent route.
+    for (const p of props) {
+      if (p.status !== 'PENDING_SELLER_APPROVAL' || !p.executable) continue;
+      const t = issueToken(p);
+      p.tokenDigest = t.digest; p.tokenExpiresAt = t.expiresAt;
+      heldWrites.set(p.id, { tool: p.tool, execute: held[p.tool] || null, token: t.token, badAttempts: 0 });
+    }
     store.data.agentRuns ||= {};
-    (store.data.agentRuns[id] ||= []).unshift({ at: new Date().toISOString(), model: llm.model, toolkit: out.agent?.toolkit, ok: out.ok,
+    (store.data.agentRuns[id] ||= []).unshift({ at: new Date().toISOString(), model: llm.model, reportedModel: out.reportedModel || null, toolkit: out.agent?.toolkit, ok: out.ok,
       recommendation: out.recommendation, activity: out.agent?.activity || [], proposals: props, flags: out.flags || [], error: out.error });
     store.data.agentRuns[id] = store.data.agentRuns[id].slice(0, 10);
     store.save?.();
@@ -142,24 +153,46 @@ export async function aiAdvice({ api, store, engine, llm, agentTools }, id, { re
   return out;
 }
 
-// Seller approval gate for agent-proposed toolkit writes. Nothing runs without approved=true and confirm "APPROVE",
-// and PayPal must still offer the action. Evidence and offer proposals go through the normal pack approval instead.
+// Seller approval gate for agent proposals. To run, a proposal must:
+//   1. be PENDING_SELLER_APPROVAL and executable, with its stored hash still matching its canonical arguments;
+//   2. come with the server-issued single-use token for this proposal id + hash + dispute (consumed on first valid use;
+//      five wrong tokens also void it);
+//   3. bind again against a FRESH PayPal read of the dispute, giving the identical canonical hash.
+// Only then does the held toolkit tool (or the offer call) run, with ProofPilot's canonical arguments and template notes.
+export function pendingToken(proposalId) { return heldWrites.get(proposalId)?.token || null; }
 export async function approveProposal({ api, store, engine, config }, proposalId, body) {
   const all = Object.values(store.data.agentRuns || {}).flat().flatMap(r => r.proposals || []);
   const p = all.find(x => x.id === proposalId);
   if (!p) throw new SubmitError('UNKNOWN_PROPOSAL', 'No such agent proposal.');
-  if (body?.approved !== true || body?.confirm !== 'APPROVE') throw new SubmitError('NOT_APPROVED', 'Seller approval is required: send approved=true and confirm="APPROVE".');
-  if (p.status !== 'PENDING_SELLER_APPROVAL') throw new SubmitError('NOT_PENDING', `Proposal is ${p.status}.`);
-  if (p.kind !== 'toolkit-write') throw new SubmitError('USE_EVIDENCE_APPROVAL', 'Evidence and offer proposals are approved in the evidence pack panel (hash-bound).');
-  const held = heldWrites.get(p.id);
-  if (!held) throw new SubmitError('PROPOSAL_EXPIRED', 'This proposal was made before a restart. Ask the agent again.');
-  if (p.tool === 'accept_dispute_claim') {
-    const a = await analyseDispute({ api, store, engine }, p.disputeId);
-    if (!a.status.actions.includes('accept_claim')) throw new SubmitError('ACTION_NOT_OFFERED', 'PayPal does not offer accept_claim on this dispute now.');
+  if (body?.approved !== true) throw new SubmitError('NOT_APPROVED', 'Seller approval is required: send approved=true and the approval code shown on the proposal.');
+  if (p.status !== 'PENDING_SELLER_APPROVAL') throw new SubmitError('NOT_PENDING', 'This proposal is not waiting for approval.', { status: p.status });
+  if (!p.executable) throw new SubmitError('USE_EVIDENCE_APPROVAL', 'Evidence proposals are approved in the evidence pack panel (hash-bound).');
+  const h = heldWrites.get(p.id);
+  if (!h || !p.tokenDigest) throw new SubmitError('PROPOSAL_EXPIRED', 'This proposal has no live approval code (server restarted or already used). Ask the agent again.');
+  if (proposalHash(p) !== p.hash) throw new SubmitError('PROPOSAL_CHANGED', 'The stored proposal no longer matches its hash.');
+  if (new Date(p.tokenExpiresAt).getTime() < Date.now()) { heldWrites.delete(p.id); p.status = 'EXPIRED'; store.save?.(); throw new SubmitError('PROPOSAL_EXPIRED', 'The approval code expired. Ask the agent again.'); }
+  if (typeof body.token !== 'string' || tokenDigest(body.token.trim(), p) !== p.tokenDigest) {
+    if (++h.badAttempts >= 5) { heldWrites.delete(p.id); p.status = 'VOIDED'; store.save?.(); }
+    store.audit({ type: 'AGENT_PROPOSAL_BAD_TOKEN', proposalId: p.id });
+    throw new SubmitError('BAD_TOKEN', 'The approval code does not match this proposal.');
   }
-  store.audit({ type: 'AGENT_PROPOSAL_APPROVED', proposalId: p.id, tool: p.tool, dryRun: Boolean(config.dryRun) });
-  if (config.dryRun) { p.status = 'APPROVED_DRY_RUN'; store.save?.(); return { dryRun: true, proposal: p }; }
-  const result = await held.execute(held.args, {});
-  p.status = 'EXECUTED_AFTER_APPROVAL'; p.executedAt = new Date().toISOString(); heldWrites.delete(p.id); store.save?.();
-  return { dryRun: false, proposal: p, result: JSON.parse(JSON.stringify(result ?? null)) };
+  heldWrites.delete(p.id); // single use: consumed now, whatever happens next
+  const a = await analyseDispute({ api, store, engine }, p.disputeId);
+  const fresh = bindProposal(p.tool, p.canonical, { dispute: a._ctx.dispute, actions: a.status.actions, allowedTypes: a.allowedTypes,
+    rejectedTypes: [...new Set(a.paypalRejected.map(r => r.type))], registry: a._ctx.recs.registry, final: { action: p.finalAction } });
+  const freshHash = fresh.ok ? proposalHash({ ...p, canonical: fresh.canonical, bound: fresh.bound }) : null;
+  if (!fresh.ok || freshHash !== p.hash) {
+    p.status = 'BLOCKED_AT_APPROVAL'; p.blockedReasons = fresh.ok ? ['PAYPAL_DATA_CHANGED'] : fresh.reasons; store.save?.();
+    store.audit({ type: 'AGENT_PROPOSAL_BLOCKED_AT_APPROVAL', proposalId: p.id, reasons: p.blockedReasons });
+    throw new SubmitError('STALE_PROPOSAL', 'PayPal data changed since the proposal, or it no longer passes the checks. Nothing was sent.', { reasons: p.blockedReasons });
+  }
+  store.audit({ type: 'AGENT_PROPOSAL_APPROVED', proposalId: p.id, tool: p.tool, hash: p.hash, dryRun: Boolean(config.dryRun) });
+  if (config.dryRun) { p.status = 'APPROVED_DRY_RUN'; store.save?.(); return { dryRun: true, proposal: p, sent: p.canonical }; }
+  let result;
+  if (p.tool === 'propose_make_offer') result = await api.makeOffer(p.disputeId, { note: p.canonical.note, amount: p.canonical.amount });
+  else if (h.execute) result = await h.execute(p.canonical, {});
+  else throw new SubmitError('PROPOSAL_EXPIRED', 'The toolkit tool for this proposal is not loaded.');
+  p.status = 'EXECUTED_AFTER_APPROVAL'; p.executedAt = new Date().toISOString(); store.save?.();
+  store.audit({ type: 'AGENT_PROPOSAL_EXECUTED', proposalId: p.id, tool: p.tool });
+  return { dryRun: false, proposal: p, sent: p.canonical, result: JSON.parse(JSON.stringify(result ?? null)) };
 }

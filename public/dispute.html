@@ -32,12 +32,16 @@ function renderAi() {
   else if (!AI.ok) body += `<div class="banner err">The model call failed (${PP.esc(AI.error)}). Using the rules engine recommendation.</div><button class="sec" id="askAi">Try again</button>`;
   else {
     const r = AI.recommendation;
-    body += `<h2>${PP.esc(r.action)}${r.evidenceType ? ` with ${PP.esc(PP.h('evidence', r.evidenceType))}` : ''} <small>(${r.source === 'llm' ? 'model' : 'rules fallback'}; ${AI.agreesWithRules ? 'agrees with' : 'differs from'} rules engine: ${PP.esc(AI.rules.action)})</small></h2>
+    const refusedAll = [...AI.rationale.refused, ...AI.narrative.refused];
+    const why = [...new Set(refusedAll.map(x => PP.h('refusal', x.reason)))];
+    body += `<h2>${PP.esc(PP.h('rec', r.action))}${r.evidenceType ? `: ${PP.esc(PP.h('evidence', r.evidenceType))}` : ''} <small>(${r.source === 'llm' ? 'model' : 'rules fallback'}; ${AI.agreesWithRules ? 'agrees with' : 'differs from'} the rules engine, which says "${PP.esc(PP.h('rec', AI.rules.action))}")</small></h2>
       ${AI.flags.map(f => `<div class="gap">${PP.esc(f)}</div>`).join('')}
       <b>Facts behind the recommendation</b>${AI.rationale.accepted.map(c => `<div class="claim">${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || '<div class="muted">No reason the model gave passed the checker.</div>'}
       <b>Facts the model suggests sending</b> <small>(rendered from PayPal record fields; tick to add to the pack)</small>
       ${AI.narrative.accepted.map(c => `<div class="claim"><input type="checkbox" class="aiPick" value="${PP.esc(c.id)}"> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || `<div class="muted">${AI.narrative.refused.length ? 'No suggested sentence passed the checker.' : 'The model suggested no facts to send (nothing to send for this recommendation).'}</div>`}
-      ${[...AI.rationale.refused, ...AI.narrative.refused].map(x => `<div class="claim bad">Refused by checker (${PP.esc(x.reason)}${x.values ? ': ' + PP.esc(x.values.join(', ')) : ''}): <s>${PP.esc(x.text || x.claimId)}</s></div>`).join('')}
+      ${refusedAll.length ? `<details class="refused"><summary>${refusedAll.length} model sentence(s) refused by the checker (${PP.esc(why.join('; '))}). Show the refused text</summary>
+        <p class="muted">This is the model's own wording. It was refused and is never sent to PayPal.</p>
+        ${refusedAll.map(x => `<div class="claim bad">${PP.esc(PP.h('refusal', x.reason))}: <s>${PP.esc(x.text || '')}</s></div>`).join('')}</details>` : ''}
       ${AI.offerAmount ? `<div>Suggested offer: ${PP.esc(A.amount.currency_code)} ${PP.esc(AI.offerAmount)}</div>` : ''}
       <small>${PP.esc(AI.provider)} · ${PP.esc(AI.model)} · ${AI.ms ?? '?'} ms · ${new Date(AI.generatedAt).toLocaleTimeString()}${AI.cached ? ' (cached for this dispute version)' : ''}</small>
       <p><button class="sec" id="askAi">Regenerate</button></p>`;
@@ -54,11 +58,11 @@ function render() {
   head.innerHTML = `<h1>${PP.esc(A.id)} ${PP.badge(s.label, s.tone)}</h1>
     <div><b>${PP.hc('reason', A.reason)}</b> · <b>${PP.esc(A.amount.currency_code)} ${PP.esc(A.amount.value)}</b> at stake · ${PP.hc('stage', A.stage)}</div>
     <div>${dl ? `Respond by <b>${new Date(dl.due).toLocaleString()}</b> (${dl.overdue ? '<span class="sev-BLOCK">overdue</span>' : `${dl.hoursLeft} h left`})` : '<span class="muted">No seller response deadline set by PayPal right now.</span>'}</div>
-    <small>${PP.esc(s.detail || '')} PayPal code: ${PP.esc(A.paypalStatus)}.</small>`;
+    <small title="PayPal code: ${PP.esc(A.paypalStatus)}">${PP.esc(s.detail || '')}</small>`;
   waiting.innerHTML = s.waiting ? `<div class="banner wait">⏳ <b>Waiting for PayPal.</b> ${PP.esc(s.detail)} Last checked ${new Date().toLocaleTimeString()}.</div>` : '';
 
   const r = A.recommendation;
-  rec.innerHTML = `<h2>Rules engine: ${PP.esc(r.action)}${r.evidenceType ? ` with ${PP.esc(PP.h('evidence', r.evidenceType))}` : ''}</h2>
+  rec.innerHTML = `<h2>Rules engine: ${PP.esc(PP.h('rec', r.action))}${r.evidenceType ? `: ${PP.esc(PP.h('evidence', r.evidenceType))}` : ''}</h2>
     <ul>${r.reasons.map(x => `<li>${PP.esc(x)}</li>`).join('')}</ul>
     <small>${PP.esc(r.engine)}: deterministic rules, not AI. Used as the fallback and as a sanity check on the AI advisor.</small>`;
 
@@ -72,9 +76,9 @@ function render() {
   if (!types.includes(type)) type = r.evidenceType && types.includes(r.evidenceType) ? r.evidenceType : types[0] || null;
   const p = type ? currentPack() : null;
   pack.innerHTML = `<h2>Evidence pack</h2>` + (!p ? '<div class="muted">No evidence can be sent right now: PayPal is not requesting evidence and offers no supporting-info action.</div>' :
-    `<label>Pack type: only evidence PayPal requests on this dispute, plus supporting info when PayPal offers it</label><select id="typeSel">${types.map(t => `<option value="${t}" ${t === type ? 'selected' : ''}>${PP.esc(PP.h('evidence', t))} (${t})${(A.paypalRejected || []).some(r => r.type === t) ? ' - refused by PayPal' : ''}</option>`).join('')}</select>
+    `<label>Pack type: only evidence PayPal requests on this dispute, plus supporting info when PayPal offers it</label><select id="typeSel">${types.map(t => `<option value="${t}" ${t === type ? 'selected' : ''}>${PP.esc(PP.h('evidence', t))}${(A.paypalRejected || []).some(r => r.type === t) ? ' - refused by PayPal' : ''}</option>`).join('')}</select>
      <div style="margin-top:8px">${p.validation.accepted.map(c => `<div class="claim"><input type="checkbox" class="cl" value="${PP.esc(c.id)}" checked> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('')}
-     ${p.validation.rejected.map(x => `<div class="claim bad">Refused by checker: ${PP.esc(x.claimId)} (${PP.esc(x.reason)})</div>`).join('')}
+     ${p.validation.rejected.map(x => `<div class="claim bad">A built-in sentence was refused by the checker: ${PP.esc(PP.h('refusal', x.reason))}</div>`).join('')}
      ${p.gaps.map(g => `<div class="gap">Gap: ${PP.esc(g.message)}</div>`).join('')}
      ${(A.refusalRisks || []).filter(x => x.type === type).map(x => `<div class="gap">Warning: ${PP.esc(x.message)}</div>`).join('')}
      ${(A.paypalRejected || []).some(r => r.type === type) ? `<div class="banner err">PayPal already refused ${PP.esc(PP.h('evidence', type))} on this dispute at this stage. ProofPilot will not send it again.</div>` : ''}
@@ -99,7 +103,7 @@ async function addClaim() {
   const [t, i] = (cref.value || '|').split('|'); const claim = { id: 'custom-' + (custom.length + 1), text: ctext.value, refs: t ? [{ type: t, id: i }] : [], source: 'seller' };
   const v = await PP.api(`/api/disputes/${encodeURIComponent(id)}/check`, { method: 'POST', body: { claims: [claim] } });
   if (v.ok) { custom.push(claim); ctext.value = ''; drawCustom(); renderApprove(); }
-  else document.getElementById('custom').insertAdjacentHTML('beforeend', `<div class="claim bad">Refused: "${PP.esc(claim.text)}" (${PP.esc(v.rejected[0].reason)}${v.rejected[0].values ? ': ' + PP.esc(v.rejected[0].values.join(', ')) : ''}).</div>`);
+  else document.getElementById('custom').insertAdjacentHTML('beforeend', `<div class="claim bad">Refused: "${PP.esc(claim.text)}" (${PP.esc(PP.h('refusal', v.rejected[0].reason))}${v.rejected[0].values ? ': ' + PP.esc(v.rejected[0].values.join(', ')) : ''}).</div>`);
 }
 function aiPicked() { const ids = [...document.querySelectorAll('.aiPick:checked')].map(x => x.value); return (AI?.narrative?.accepted || []).filter(c => ids.includes(c.id)); }
 function selectedClaims() { const p = currentPack(); const keep = [...document.querySelectorAll('.cl:checked')].map(x => x.value);
@@ -115,10 +119,10 @@ function renderApprove() {
   const canEvidence = p && !refused && acts.includes(evidenceAction) && (type === 'SUPPORTING_INFO' || p.requirementMet);
   const n = p ? selectedClaims().claims.length : 0; const nAi = aiPicked().length;
   approve.innerHTML = `<h2>Approve and submit</h2>
-    ${canEvidence ? `<p>Send <b>${n}</b> cited statement(s)${nAi ? ` (${nAi} AI-drafted)` : ''} as <b>${PP.esc(PP.h('evidence', type))}</b> via <span class="chip">${evidenceAction}</span>. A PDF of the pack is attached.</p>` : `<p class="muted">Evidence submission is not available: ${p ? [!acts.includes(evidenceAction) ? `PayPal does not offer ${PP.esc(PP.h('action', evidenceAction))} now` : '', !(p.requirementMet || type === 'SUPPORTING_INFO') ? 'the pack is incomplete' : '', refused ? 'PayPal already refused this type here' : ''].filter(Boolean).join('; ') : 'no pack'}.</p>`}
+    ${canEvidence ? `<p>Send <b>${n}</b> cited statement(s)${nAi ? ` (${nAi} AI-drafted)` : ''} as <b>${PP.esc(PP.h('evidence', type))}</b> (${PP.esc(PP.h('action', evidenceAction))}). A PDF of the pack is attached.</p>` : `<p class="muted">Evidence submission is not available: ${p ? [!acts.includes(evidenceAction) ? `PayPal does not offer ${PP.esc(PP.h('action', evidenceAction))} now` : '', !(p.requirementMet || type === 'SUPPORTING_INFO') ? 'the pack is incomplete' : '', refused ? 'PayPal already refused this type here' : ''].filter(Boolean).join('; ') : 'no pack'}.</p>`}
     ${acts.includes('make_offer') ? `<p>Offer amount (${PP.esc(A.amount.currency_code)}): <input id="offerAmt" size="8" placeholder="${PP.esc(A.amount.value)}"></p>` : ''}
     ${canEvidence ? '<label><input type="checkbox" id="attachPdf" checked> Attach a PDF copy of the pack</label>' : ''}
-    ${(A.paypalRejected || []).map(r => `<div class="gap">PayPal rejected ${PP.esc(PP.h('evidence', r.type))} on this dispute ${r.at ? 'at ' + new Date(r.at).toLocaleString() : '(time not recorded)'} (EVIDENCE_TYPE_IS_NOT_ALLOWED, debug_id ${PP.esc(r.debugId)}; source: ${PP.esc(r.source || '')}).</div>`).join('')}
+    ${(A.paypalRejected || []).map(r => `<div class="gap">PayPal rejected ${PP.esc(PP.h('evidence', r.type))} on this dispute ${r.at ? 'at ' + new Date(r.at).toLocaleString() : '(time not recorded)'} (PayPal said this evidence type is not allowed; PayPal debug id ${PP.esc(r.debugId)}).</div>`).join('')}
     <label>Type APPROVE to confirm you reviewed every statement</label><input id="conf" size="12">
     <p>${canEvidence ? '<button id="subEv">Submit to PayPal</button> ' : ''}${acts.includes('make_offer') ? '<button class="sec" id="subOffer">Make offer</button> ' : ''}${acts.includes('accept_claim') ? '<button class="sec" id="subAccept">Accept claim (refund)</button>' : ''}</p>
     <div id="out"></div>`;
@@ -133,7 +137,7 @@ function renderApprove() {
   if (window.subEv) subEv.onclick = async () => { const { exclude, extra, claims } = selectedClaims();
     const canon = JSON.stringify({ disputeId: A.id, evidenceType: type, claims: claims.map(c => ({ id: c.id, text: c.text, refs: c.refs })) });
     go({ action: evidenceAction, evidenceType: type === 'SUPPORTING_INFO' ? undefined : type, excludeClaimIds: exclude, customClaims: extra, packHash: await sha16(canon), attachPdf: window.attachPdf ? attachPdf.checked : true }); };
-  if (window.subOffer) subOffer.onclick = () => go({ action: 'make_offer', offerAmount: offerAmt.value });
+  if (window.subOffer) subOffer.onclick = () => go({ action: 'make_offer', offerAmount: offerAmt.value.trim() });
   if (window.subAccept) subAccept.onclick = () => go({ action: 'accept_claim' });
   const last = JSON.parse(sessionStorage.getItem('pp-last-submit') || 'null');
   if (last && last.id === id && !out.innerHTML) out.innerHTML = `<div class="banner info">Last submission ${new Date(last.at).toLocaleString()}: ${PP.badge(last.before.label, 'act')} → ${PP.badge(last.after.label, 'review')}</div>`;
@@ -150,19 +154,23 @@ function renderAgent() {
   let h = `<h2>Agent activity <small>${PP.esc(info?.toolkit || run?.toolkit || '@paypal/agent-toolkit')} · ${PP.esc(PP.cfg?.ai?.model || run?.model || '')} · sandbox</small></h2>
     <p class="muted">Read tools run on their own; results are redacted (no emails, names or addresses). Write tools never run on their own: the agent can only propose them, and a proposal runs only after you approve it here.</p>`;
   if (!run) { agentCard.innerHTML = h + '<div class="muted">No agent run yet for this dispute. Use the AI advisor above.</div>'; return; }
-  h += `<small>Run ${new Date(run.at).toLocaleString()} · ${run.ok ? 'finished' : 'failed: ' + PP.esc(run.error || '')} · recommendation ${PP.esc(run.recommendation?.action || '-')} (${PP.esc(run.recommendation?.source || '-')})</small>
-    <table class="simple" id="agentLog"><tr><th>When</th><th>Tool</th><th>Kind</th><th>Arguments</th><th>Result (redacted)</th></tr>
-    ${run.activity.map(a => `<tr><td>${new Date(a.at).toLocaleTimeString()}</td><td><span class="chip">${PP.esc(a.tool)}</span></td><td>${kindChip(a.kind)}${a.ok ? '' : ' <span class="sev-BLOCK">error</span>'}</td>
-      <td><code>${PP.esc(JSON.stringify(a.args))}</code></td><td><details><summary>${PP.esc(String(a.result).slice(0, 70))}${String(a.result).length > 70 ? '…' : ''}</summary><pre>${PP.esc(a.result)}</pre></details></td></tr>`).join('') || '<tr><td colspan="5" class="muted">The agent made no tool calls.</td></tr>'}</table>`;
-  h += `<h3>Proposed actions (not executed)</h3>` + (run.proposals.length ? run.proposals.map(p => `<div class="claim ${p.status === 'BLOCKED' ? 'bad' : ''}">
-      <b>${PP.esc(p.tool)}</b> <code>${PP.esc(JSON.stringify(p.args))}</code> · status <b>${PP.esc(p.status)}</b>${p.reason ? ' · ' + PP.esc(p.reason) : ''}
-      ${p.status === 'PENDING_SELLER_APPROVAL' && p.kind === 'toolkit-write' ? `<div>Type APPROVE to run this on PayPal: <input size="9" id="pc-${p.id}"> <button class="sec" data-approve="${p.id}">Approve and run</button> <button class="sec" data-dismiss="${p.id}">Dismiss</button></div>` : ''}
-      ${p.status === 'PENDING_SELLER_APPROVAL' && p.kind === 'evidence' ? `<div><button class="sec" data-usepack="${PP.esc(p.args.evidence_type)}">Open in evidence pack</button> (sent only through Approve and submit below)</div>` : ''}
+  h += `<small>Run ${new Date(run.at).toLocaleString()} · ${run.ok ? 'finished' : 'failed: ' + PP.esc(run.error || '')} · recommendation "${PP.esc(PP.h('rec', run.recommendation?.action) || '-')}" (${run.recommendation?.source === 'llm' ? 'model' : 'rules fallback'})${run.reportedModel ? ' · model reported by the API: ' + PP.esc(run.reportedModel) : ''}</small>
+    <table class="simple" id="agentLog"><tr><th>When</th><th>Step</th><th>Kind</th><th>Arguments</th><th>Result (redacted)</th></tr>
+    ${run.activity.map(a => `<tr><td>${new Date(a.at).toLocaleTimeString()}</td><td title="PayPal Agent Toolkit tool: ${PP.esc(a.tool)}">${PP.esc(PP.h('tool', a.tool))}</td><td>${kindChip(a.kind)}${a.ok ? '' : ' <span class="sev-BLOCK">error</span>'}</td>
+      <td>${a.kind === 'read' ? `<code>${PP.esc(JSON.stringify(a.args))}</code>` : `<small>model's arguments not used${a.args?.fields?.length ? ' (it supplied: ' + PP.esc(a.args.fields.join(', ')) + ')' : ''}</small>`}</td><td><details><summary>${PP.esc(String(a.result).slice(0, 70))}${String(a.result).length > 70 ? '…' : ''}</summary><pre>${PP.esc(a.result)}</pre></details></td></tr>`).join('') || '<tr><td colspan="5" class="muted">The agent made no tool calls.</td></tr>'}</table>`;
+  const statusWords = { PENDING_SELLER_APPROVAL: 'waiting for your approval', BLOCKED: 'blocked by ProofPilot', BLOCKED_AT_APPROVAL: 'blocked when re-checked against PayPal', APPROVED_DRY_RUN: 'approved (dry run, nothing sent)', EXECUTED_AFTER_APPROVAL: 'sent to PayPal after your approval', DISMISSED: 'dismissed', EXPIRED: 'approval code expired', VOIDED: 'voided after wrong codes', RECORDED: 'recorded' };
+  h += `<h3>Proposed actions (not executed)</h3><p class="muted">ProofPilot rebuilds every proposal from the dispute's own PayPal records: same case, same payment, at most the disputed amount, same currency, and only if it matches the final recommendation. Notes to PayPal and the buyer are ProofPilot templates, never the model's text.</p>` + (run.proposals.length ? run.proposals.map(p => `<div class="claim ${/BLOCKED/.test(p.status) ? 'bad' : ''}">
+      <b>${PP.esc(PP.h('tool', p.tool))}</b>: ${PP.esc(p.description || '')} · <b>${PP.esc(statusWords[p.status] || PP.h('x', p.status))}</b>
+      ${(p.blockedReasons || []).length ? `<div>Why: ${PP.esc(p.blockedReasons.map(r => PP.h('binding', r)).join('; '))}</div>` : ''}
+      ${p.canonical ? `<details><summary>Exactly what would be sent</summary><pre>${PP.esc(JSON.stringify(p.canonical, null, 2))}</pre><small>Proposal hash ${PP.esc(String(p.hash || '').slice(0, 16))}</small></details>` : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && p.approvalCode ? `<div>Approval code for this proposal: <code class="code">${PP.esc(p.approvalCode)}</code> (single use, expires ${new Date(p.tokenExpiresAt).toLocaleTimeString()}). Type it to run this on PayPal: <input size="20" id="pc-${p.id}"> <button class="sec" data-approve="${p.id}">Approve and run</button> <button class="sec" data-dismiss="${p.id}">Dismiss</button></div>` : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && !p.approvalCode ? '<div class="muted">No live approval code (the server restarted or the code was used). Ask the agent again.</div>' : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.kind === 'evidence' && p.canonical?.evidence_type ? `<div><button class="sec" data-usepack="${PP.esc(p.canonical.evidence_type)}">Open in evidence pack</button> (sent only through Approve and submit below)</div>` : ''}
     </div>`).join('') : '<div class="muted">The agent proposed no write action.</div>');
   agentCard.innerHTML = h;
   agentCard.querySelectorAll('[data-approve]').forEach(b => b.onclick = async () => { const pid = b.dataset.approve;
-    try { const r = await PP.api(`/api/agent/proposals/${pid}/approve`, { method: 'POST', body: { approved: true, confirm: document.getElementById('pc-' + pid).value } });
-      alert(r.dryRun ? 'Dry run: approved, nothing sent.' : 'Executed on PayPal sandbox.'); } catch (e) { alert(e.message); } loadAgent(); refresh(); });
+    try { const r = await PP.api(`/api/agent/proposals/${pid}/approve`, { method: 'POST', body: { approved: true, token: document.getElementById('pc-' + pid).value } });
+      alert(r.dryRun ? 'Dry run: approved and re-checked against PayPal, nothing sent.' : 'Sent to PayPal sandbox.'); } catch (e) { alert(e.message); } loadAgent(); refresh(); });
   agentCard.querySelectorAll('[data-dismiss]').forEach(b => b.onclick = async () => { await PP.api(`/api/agent/proposals/${b.dataset.dismiss}/dismiss`, { method: 'POST', body: {} }); loadAgent(); });
   agentCard.querySelectorAll('[data-usepack]').forEach(b => b.onclick = () => { type = b.dataset.usepack; render(); pack.scrollIntoView(); });
 }

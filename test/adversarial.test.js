@@ -57,6 +57,6 @@ test('adversarial model output via adviseWithLlm', async () => {
   assert.equal(out.recommendation.source, 'rules-fallback');
   assert.equal(out.recommendation.action, rules.action);
   assert.ok(out.flags.some(f => /does not request/.test(f)));
-  assert.ok(out.flags.some(f => /Offer amount/.test(f)));
+  assert.ok(out.flags.some(f => /offer amount was ignored/.test(f)));
   assert.ok([...out.rationale.refused, ...out.narrative.refused].some(x => x.reason === 'OUTCOME_CLAIM'));
 });

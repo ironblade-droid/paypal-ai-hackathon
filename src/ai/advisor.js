@@ -9,6 +9,7 @@
 //   3. The recommendation must be an action PayPal currently offers, and is compared with the rules engine
 //      (proofpilot-rules-v1). If the model says FIGHT without a complete pack, the rules engine's answer is used instead.
 //   4. The seller still approves the exact pack before anything is sent.
+import { parseAmount } from '../lib/money.js';
 import { validateClaims, factCatalog } from '../engine/evidence.js';
 import { human } from '../engine/labels.js';
 
@@ -82,7 +83,7 @@ function collect(j, idsKey, textKey, prefix, registry, catalog) {
   for (const fid of Array.isArray(j[idsKey]) ? j[idsKey] : []) {
     const f = byId.get(String(fid));
     if (f) picked.push({ id: `${prefix}-${picked.length + 1}`, text: f.text, refs: f.refs, source: 'ai', factId: f.id });
-    else unknown.push({ claimId: String(fid), reason: 'UNKNOWN_FACT', text: `Fact id "${String(fid).slice(0, 80)}" is not in the catalog.` });
+    else unknown.push({ claimId: `${prefix}-unknown-${unknown.length + 1}`, reason: 'UNKNOWN_FACT', text: 'The model cited a fact id that is not in ProofPilot\'s catalog.' });
   }
   const free = parseCitedSentences(j[textKey], `${prefix}-t`);
   const v = validateClaims([...picked, ...free], registry, { strict: true });
@@ -104,11 +105,13 @@ export async function adviseWithLlm(provider, { dispute, allowedTypes, actions, 
 export function finishAdvice(j, { provider, started = Date.now(), dispute, allowedTypes, actions, registry, packs, rules, rejectedTypes = [] }) {
   const flags = [];
   let action = String(j.action || '').toUpperCase();
-  if (!(action in ACTION_NEEDS)) { flags.push(`Model returned an unknown action "${j.action}".`); action = null; }
-  else if (ACTION_NEEDS[action] && !actions.includes(ACTION_NEEDS[action])) { flags.push(`Model chose ${action}, but PayPal does not offer ${ACTION_NEEDS[action]} on this dispute.`); action = null; }
+  // Model strings are never echoed back: unknown values become a fixed flag and modelAction is one of the known actions or null.
+  const modelAction = action in ACTION_NEEDS ? action : (j.action ? 'UNRECOGNISED' : null);
+  if (!(action in ACTION_NEEDS)) { flags.push('The model returned an action ProofPilot does not recognise. Using the rules engine instead.'); action = null; }
+  else if (ACTION_NEEDS[action] && !actions.includes(ACTION_NEEDS[action])) { flags.push(`The model chose "${human('rec', action)}", but PayPal does not offer that on this dispute right now.`); action = null; }
   let evidenceType = j.evidence_type || null;
-  if (evidenceType && !allowedTypes.includes(evidenceType)) { flags.push(`Model chose evidence type ${evidenceType}, which this dispute does not request.`); evidenceType = null; }
-  if (evidenceType && rejectedTypes.includes(evidenceType)) { flags.push(`Model chose ${evidenceType}, which PayPal already refused on this dispute.`); evidenceType = null; }
+  if (evidenceType && !allowedTypes.includes(evidenceType)) { flags.push('The model chose an evidence type this dispute does not request.'); evidenceType = null; }
+  if (evidenceType && rejectedTypes.includes(evidenceType)) { flags.push(`The model chose ${human('evidence', evidenceType)}, which PayPal already refused on this dispute.`); evidenceType = null; }
   if (action === 'FIGHT' && !(evidenceType && packs[evidenceType]?.requirementMet)) {
     flags.push('Sanity check: FIGHT needs a requested evidence type with a complete, cited pack. Using the rules engine instead.'); action = null;
   }
@@ -118,16 +121,16 @@ export function finishAdvice(j, { provider, started = Date.now(), dispute, allow
   if (action && !rationale.accepted.length) { flags.push('The model gave no reason that passed the checker. Using the rules engine instead.'); action = null; }
   let offerAmount = null;
   if (j.offer_amount != null && j.offer_amount !== '') {
-    const v = Number(j.offer_amount); const max = Number(dispute?.dispute_amount?.value || 0);
-    if (action === 'OFFER' && v > 0 && v <= max) offerAmount = v.toFixed(2);
-    else flags.push(`Offer amount "${String(j.offer_amount).slice(0, 20)}" ignored: only valid with OFFER, above 0 and at most the disputed amount.`);
+    const p = parseAmount(j.offer_amount); const max = parseAmount(String(dispute?.dispute_amount?.value ?? ''));
+    if (action === 'OFFER' && p && max && p.cents >= 1 && p.cents <= max.cents) offerAmount = p.value;
+    else flags.push('The model\'s offer amount was ignored: it must be a plain amount of at least 0.01, at most the disputed amount, and only with "Make an offer".');
   }
   const final = action ? { action, evidenceType: action === 'FIGHT' ? evidenceType : null, source: 'llm' }
     : { action: rules.action, evidenceType: rules.evidenceType || null, source: 'rules-fallback' };
   return {
     available: true, ok: true, provider: provider.provider, model: provider.model, label: provider.label, ms: Date.now() - started,
     generatedAt: new Date().toISOString(),
-    recommendation: final, modelAction: j.action || null, agreesWithRules: final.action === rules.action, rules: { action: rules.action, evidenceType: rules.evidenceType || null },
+    recommendation: final, modelAction, agreesWithRules: final.action === rules.action, rules: { action: rules.action, evidenceType: rules.evidenceType || null },
     offerAmount, flags, rationale, narrative,
   };
 }

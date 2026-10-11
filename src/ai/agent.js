@@ -9,8 +9,10 @@
 //   - guardTools() rebuilds the tool set from an allowlist. READ tools run autonomously; their results are redacted
 //     (secrets, emails, names, addresses, phone numbers) before the model or the activity log sees them.
 //   - WRITE tools (accept_dispute_claim, create_shipment_tracking, create_refund) keep their schema but their execute is
-//     replaced: calling one only records a PROPOSAL. The toolkit's original execute is held server-side and runs only
-//     from the approval route after the seller types APPROVE (src/app.js).
+//     replaced: calling one only records a PROPOSAL. Proposals are then bound to the dispute, its payment and order,
+//     the disputed amount and currency, and the final recommendation (src/ai/proposals.js); the model's arguments are
+//     replaced by canonical ones and template notes. The toolkit's original execute is held server-side and runs only
+//     from the approval route with a single-use, server-issued token, after a fresh PayPal re-check.
 //   - Any other toolkit tool is dropped. ProofPilot adds two proposal-only tools for actions the toolkit lacks
 //     (provide evidence, make offer); those go through the existing hash-bound evidence approval.
 //   - The agent's final answer goes through finishAdvice(): structured fact ids, the hardened citation checker, the
@@ -23,6 +25,7 @@ import { z } from 'zod';
 import { redact } from '../lib/redact.js';
 import { finishAdvice, buildUserPrompt, SYSTEM_PROMPT } from './advisor.js';
 import { parseJsonText } from './providers.js';
+import { bindProposal, proposalHash, describeProposal, TOOL_RULES } from './proposals.js';
 
 const require = createRequire(import.meta.url);
 export const TOOLKIT_NAME = '@paypal/agent-toolkit';
@@ -77,11 +80,15 @@ export function guardTools(raw, { activity, proposals, disputeId, toolFactory })
       }
     } };
   }
+  // A proposal keeps the model's arguments only in memory until binding (runAgent); what is stored and shown are the
+  // canonical arguments ProofPilot rebuilds, plus the NAMES of the fields the model supplied.
   const propose = (name, kind) => async (args) => {
-    const p = { id: 'prop-' + crypto.randomUUID().slice(0, 8), at: new Date().toISOString(), disputeId, tool: name, kind, args, status: 'PENDING_SELLER_APPROVAL' };
+    const p = { id: 'prop-' + crypto.randomUUID().slice(0, 8), at: new Date().toISOString(), disputeId, tool: name, kind,
+      modelFields: Object.keys(args || {}).slice(0, 20).map(k => String(k).slice(0, 40)), status: 'RECORDED' };
+    Object.defineProperty(p, '_modelArgs', { value: args, enumerable: false, configurable: true });
     proposals.push(p);
-    const result = { status: 'PROPOSED_NOT_EXECUTED', proposal_id: p.id, message: 'Queued for the seller to approve. Nothing was sent to PayPal.' };
-    activity.push({ at: p.at, tool: name, kind: 'write-proposed', args: redactDeep(args), ok: true, ms: 0, result: clip(result) });
+    const result = { status: 'PROPOSED_NOT_EXECUTED', proposal_id: p.id, message: 'Recorded for ProofPilot to check and the seller to approve. Nothing was sent to PayPal.' };
+    activity.push({ at: p.at, tool: name, kind: 'write-proposed', args: { fields: p.modelFields }, ok: true, ms: 0, result: clip(result) });
     return result;
   };
   for (const name of WRITE_TOOLS) {
@@ -126,13 +133,21 @@ export async function runAgent({ provider, rawTools, ctx, maxSteps = 8, generate
   const out = finishAdvice(j, { provider, started, ...ctx });
   out.flags = [...flags, ...out.flags];
   if (flags.length) out.recommendation = { action: ctx.rules.action, evidenceType: ctx.rules.evidenceType || null, source: 'rules-fallback' };
-  // Proposals are checked like the recommendation: action must be offered, type requested and not refused.
+  // Bind every proposal to this dispute and the FINAL recommendation (see proposals.js). Only the first one that binds
+  // and is executable stays pending; everything else is blocked with plain reasons. Model arguments are dropped here.
+  let pending = 0;
   for (const p of proposals) {
-    const need = { accept_dispute_claim: 'accept_claim', propose_provide_evidence: 'provide_evidence', propose_make_offer: 'make_offer' }[p.tool];
-    if (need && !ctx.actions.includes(need)) { p.status = 'BLOCKED'; p.reason = `PayPal does not offer ${need} on this dispute.`; }
-    if (p.tool === 'propose_provide_evidence' && (!ctx.allowedTypes.includes(p.args.evidence_type) || (ctx.rejectedTypes || []).includes(p.args.evidence_type))) {
-      p.status = 'BLOCKED'; p.reason = `${p.args.evidence_type} is not requested on this dispute or PayPal already refused it.`; }
-    if (p.args?.dispute_id && p.args.dispute_id !== ctx.dispute.dispute_id) { p.status = 'BLOCKED'; p.reason = 'Proposal targets a different dispute.'; }
+    const b = bindProposal(p.tool, p._modelArgs, { ...ctx, final: out.recommendation });
+    delete p._modelArgs;
+    p.canonical = b.canonical; p.bound = b.bound; p.finalAction = out.recommendation?.action || null;
+    p.description = describeProposal(p.tool, b.canonical, b.bound);
+    p.executable = Boolean(TOOL_RULES[p.tool]?.executable);
+    if (b.ok && pending === 0) { p.status = 'PENDING_SELLER_APPROVAL'; p.hash = proposalHash(p); pending++; }
+    else { p.status = 'BLOCKED'; p.blockedReasons = b.ok ? ['ONE_PROPOSAL_PER_RUN'] : b.reasons; }
   }
+  // The model name Gemini itself reports (modelVersion in each raw response body), not the id ProofPilot asked for.
+  const versions = [...new Set((res.steps || []).map(st => st.response?.body?.modelVersion).filter(Boolean))];
+  out.reportedModel = versions.length ? versions.join(', ') : null;
+  out.requestedModel = provider.model;
   return { ...out, mode: 'agent', steps: res.steps?.length ?? null, agent: { ...meta, activity, proposals }, _held: held };
 }

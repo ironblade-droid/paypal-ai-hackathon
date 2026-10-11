@@ -3,6 +3,7 @@
 // ProofPilot fetched from the API in this session. The checker refuses any claim without such a link.
 import crypto from 'node:crypto';
 import { human } from './labels.js';
+import { normalizeText, hasHiddenChars } from '../lib/text.js';
 
 // ---- Which evidence types can the seller send? Only what the dispute itself asks for (never a fixed list).
 export function allowedEvidenceTypes(dispute) {
@@ -147,7 +148,7 @@ export function buildPack(evidenceType, { dispute, capture, order, trackers, reg
     for (const r of done) c(`refund-${r.id}`, `Refund ${r.id} of ${money(r.amount)} completed.`, [{ type: 'refund', id: r.id }]);
   }
   if (!SUPPORTED_TYPES.includes(evidenceType))
-    gaps.push({ code: 'UNSUPPORTED_EVIDENCE_TYPE', message: `PayPal asks for ${evidenceType}. That needs a document ProofPilot does not have (no PayPal API record proves it), so ProofPilot will not send a pack under this label.` });
+    gaps.push({ code: 'UNSUPPORTED_EVIDENCE_TYPE', message: `PayPal asks for "${human('evidence', evidenceType)}". That needs a document ProofPilot does not have (no PayPal API record proves it), so ProofPilot will not send a pack under this label.` });
   return { evidenceType, claims, gaps, requirementMet: meetsRequirement(evidenceType, claims, registry) };
 }
 
@@ -174,16 +175,21 @@ export function meetsRequirement(type, claims, registry) {
 // This is the structured-claims design: the model picks fact ids, ProofPilot writes the words.
 export const OUTCOME_WORDS = /\b(won|win|wins|winning|winner|lose|loses|losing|guarantee[sd]?|certain(ly)?|sure to|bound to|will (fail|succeed|prevail|be (resolved|decided|closed|rejected|denied))|should (rule|decide|side|find|close|reject|deny)|rule[sd]? (in|for|against)|ruling|decide[sd]? (in|for|against)|in (our|my|your|the seller'?s?) favou?r|favou?r(able|s)?|verdict|outcome|likely|chances?|odds|expect\w* .{0,40}(decision|ruling|result|refund)|resolved in|seller fav)\b/i;
 
+// A "$" or "dollars" can be any dollar currency; every other symbol or code maps to exactly one currency.
+const DOLLARS = ['USD', 'CAD', 'AUD', 'NZD', 'SGD', 'HKD', 'MXN'];
+const SYMBOL_CURRENCIES = { '$': DOLLARS, DOLLAR: DOLLARS, DOLLARS, '€': ['EUR'], '£': ['GBP'], '₹': ['INR'] };
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
 const pad = (n) => String(n).padStart(2, '0');
 // Pull every checkable value out of a sentence: { raw, needles: [alternatives, any one must be in the cited data] }.
 export function extractValues(text) {
-  const t = String(text); const out = [];
+  const t = normalizeText(text); const out = [];
   const amt = /(?:\b(USD|EUR|GBP|INR|CAD|AUD)\s?|([$€£₹])\s?)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?\b|\b(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?\s?(USD|EUR|GBP|INR|CAD|AUD|dollars?)\b/gi;
   for (const m of t.matchAll(amt)) {
     const whole = (m[3] || m[5]).replace(/,/g, ''); const frac = m[4] ?? m[6] ?? '';
     const v = `${whole}.${frac.padEnd(2, '0').slice(0, 2)}`;
-    out.push({ raw: m[0].trim(), needles: [`"value":"${v}"`, ` ${v}`] });
+    const sym = (m[1] || m[2] || m[7] || '').toUpperCase();
+    const currencies = SYMBOL_CURRENCIES[sym] || [sym];
+    out.push({ raw: m[0].trim(), needles: [`"value":"${v}"`, ` ${v}`], money: { value: v, currencies } });
   }
   for (const m of t.matchAll(/\b\d+\.\d{2}\b/g)) out.push({ raw: m[0], needles: [m[0]] });
   for (const m of t.matchAll(/\b(\d{4})-(\d{2})-(\d{2})/g)) out.push({ raw: m[0], needles: [m[0]] });
@@ -204,7 +210,14 @@ export function unsupportedValues(text, refs, registry) {
   const hay = refs.map(r => { const d = registry.get(r.type, r.id)?.data || {};
     const extra = r.type === 'tracker' ? { proofpilot_timing: registryTiming(registry, d) } : {};
     return JSON.stringify({ ...d, ...extra }) + ' ' + r.type + ' ' + r.id; }).join(' ').toLowerCase();
-  return [...new Set(extractValues(text).filter(v => !v.needles.some(n => hay.includes(n.toLowerCase()))).map(v => v.raw))];
+  // Money in the cited records as "CUR value" pairs, so "EUR 5.50" does not pass on a USD 5.50 capture.
+  const pairs = new Set();
+  const walk = (o) => { if (!o || typeof o !== 'object') return; if (typeof o.currency_code === 'string' && typeof o.value === 'string') pairs.add(`${o.currency_code.toUpperCase()} ${o.value}`); for (const x of Object.values(o)) walk(x); };
+  for (const r of refs) walk(registry.get(r.type, r.id)?.data);
+  const bad = extractValues(text).filter(v => v.money
+    ? !v.money.currencies.some(c => pairs.has(`${c} ${v.money.value}`))
+    : !v.needles.some(n => hay.includes(n.toLowerCase())));
+  return [...new Set(bad.map(v => v.raw))];
 }
 
 const money = (a) => (a ? `${a.currency_code} ${a.value}` : 'unknown amount');
@@ -262,7 +275,8 @@ export function validateClaims(claims, registry, { strict = false } = {}) {
     const holds = cl.refs.filter(r => r.type === 'refund' && registry.get(r.type, r.id)?.data?.proofpilot_classification !== 'SELLER_REFUND');
     if (holds.length) { rejected.push({ claimId: cl.id, reason: 'NOT_A_SELLER_REFUND', missing: holds }); continue; }
     if (cl.trailingText) { rejected.push({ claimId: cl.id, reason: 'TEXT_AFTER_CITATION' }); continue; }
-    if (OUTCOME_WORDS.test(cl.text)) { rejected.push({ claimId: cl.id, reason: 'OUTCOME_CLAIM' }); continue; }
+    if (hasHiddenChars(cl.text)) { rejected.push({ claimId: cl.id, reason: 'HIDDEN_CHARACTERS' }); continue; }
+    if (OUTCOME_WORDS.test(normalizeText(cl.text))) { rejected.push({ claimId: cl.id, reason: 'OUTCOME_CLAIM' }); continue; }
     const bad = unsupportedValues(cl.text, cl.refs, registry);
     if (bad.length) { rejected.push({ claimId: cl.id, reason: 'VALUE_NOT_IN_CITED_RECORD', values: bad }); continue; }
     const late = cl.refs.filter(r => r.type === 'tracker' && registryTiming(registry, registry.get(r.type, r.id)?.data).status !== 'BEFORE_DISPUTE');

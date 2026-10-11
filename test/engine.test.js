@@ -129,7 +129,7 @@ test('tracking claims are labelled as sandbox test data', () => {
 
 test('rules engine: a type PayPal already refused is not recommended again', () => {
   const r = rulesEngine.recommend({ dispute: dispute(), allowedTypes: ['PROOF_OF_FULFILLMENT'], packs: { PROOF_OF_FULFILLMENT: { requirementMet: true, validation: { ok: true } } }, rejectedTypes: ['PROOF_OF_FULFILLMENT'] });
-  assert.notEqual(r.action, 'FIGHT'); assert.match(r.reasons[0], /already refused PROOF_OF_FULFILLMENT/);
+  assert.notEqual(r.action, 'FIGHT'); assert.match(r.reasons[0], /already refused "Proof of shipment \/ delivery"/);
 });
 test('unsupported requested types (e.g. delivery signature) are never ready', () => {
   const p = buildPack('PROOF_OF_DELIVERY_SIGNATURE', { dispute: dispute(), capture, order, trackers: [tracker], registry: reg() });

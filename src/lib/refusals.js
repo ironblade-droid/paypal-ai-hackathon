@@ -1,3 +1,4 @@
+import { human } from '../engine/labels.js';
 // PayPal evidence-type refusals (EVIDENCE_TYPE_IS_NOT_ALLOWED), kept so ProofPilot never recommends a refused type again.
 // Three sources, merged and de-duplicated by debug id:
 //   1. seed/paypal-refusals.json: committed, so a fresh install or a hosted demo (whose disk resets) still knows them;
@@ -35,5 +36,5 @@ export function derivedRefusalRisks(dispute) {
   const ev = dispute?.evidences || [];
   const requestedNow = ev.filter(e => e.source === 'REQUESTED_FROM_SELLER' && e.dispute_life_cycle_stage === stage).map(e => e.evidence_type);
   return [...new Set(requestedNow)].filter(t => ev.some(e => e.source === 'SUBMITTED_BY_SELLER' && e.evidence_type === t && e.dispute_life_cycle_stage && e.dispute_life_cycle_stage !== stage))
-    .map(t => ({ type: t, message: `You already sent ${t} at an earlier stage of this case. In sandbox testing PayPal refused the same type when it was requested again at the next stage, so it may be refused here too.` }));
+    .map(t => ({ type: t, message: `You already sent "${human('evidence', t)}" at an earlier stage of this case. In sandbox testing PayPal refused the same type when it was requested again at the next stage, so it may be refused here too.` }));
 }

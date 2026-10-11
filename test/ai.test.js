@@ -26,17 +26,17 @@ test('provider selection and default models', () => {
   assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).provider, 'gemini');
   assert.equal(createLlmProvider({ GROQ_API_KEY: 'q-key-1234567890' }).provider, 'groq');
   assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890', GROQ_API_KEY: 'q-key-1234567890', PROOFPILOT_LLM_PROVIDER: 'groq' }).provider, 'groq');
-  assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).model, DEFAULT_MODELS.gemini); assert.equal(DEFAULT_MODELS.gemini, 'gemini-3.5-flash');
+  assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).model, DEFAULT_MODELS.gemini); assert.equal(DEFAULT_MODELS.gemini, 'gemini-3.6-flash');
   assert.equal(createLlmProvider({ GROQ_API_KEY: 'q-key-1234567890', GROQ_MODEL: 'x/y' }).model, 'x/y');
 });
 
 test('gemini request shape (mocked fetch): key in header, JSON mime type, parses candidates', async () => {
   let seen;
   const fetchImpl = async (url, init) => { seen = { url, init }; return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"action":"WAIT"}' }] } }] }), { status: 200 }); };
-  const p = geminiProvider({ apiKey: 'gem-test-key-123456', model: 'gemini-3.5-flash', fetchImpl });
+  const p = geminiProvider({ apiKey: 'gem-test-key-123456', model: 'gemini-3.6-flash', fetchImpl });
   const r = await p.completeJSON({ system: 's', user: 'u' });
   assert.deepEqual(r.json, { action: 'WAIT' });
-  assert.match(seen.url, /models\/gemini-3\.5-flash:generateContent$/);
+  assert.match(seen.url, /models\/gemini-3\.6-flash:generateContent$/);
   assert.equal(seen.init.headers['x-goog-api-key'], 'gem-test-key-123456');
   assert.ok(!seen.url.includes('gem-test-key'), 'key never in URL');
   assert.equal(JSON.parse(seen.init.body).generationConfig.responseMimeType, 'application/json');
@@ -90,7 +90,7 @@ test('model may not pick a type PayPal refused; no checkable reason means rules 
 
 test('sanity checks: action not offered, type not requested, FIGHT without complete pack -> rules fallback', async () => {
   const a = await adviseWithLlm(mock({ action: 'OFFER', narrative: [], rationale_facts: ['capture:CAP123:amount'] }), ctx());
-  assert.equal(a.recommendation.source, 'rules-fallback'); assert.match(a.flags[0], /does not offer make_offer/);
+  assert.equal(a.recommendation.source, 'rules-fallback'); assert.match(a.flags[0], /does not offer that on this dispute/);
   const b = await adviseWithLlm(mock({ action: 'FIGHT', evidence_type: 'OTHER', narrative: [] }), ctx());
   assert.ok(b.flags.some(f => /does not request/.test(f))); assert.equal(b.recommendation.source, 'rules-fallback');
   const c = await adviseWithLlm(mock({ action: 'FIGHT', evidence_type: 'PROOF_OF_FULFILLMENT' }), ctx({ packs: { PROOF_OF_FULFILLMENT: { requirementMet: false, validation: { ok: true } } } }));

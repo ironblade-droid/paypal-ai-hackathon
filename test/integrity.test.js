@@ -85,7 +85,7 @@ test('fresh install: the seeded dispute never recommends or sends the refused ty
     const a = await (await fetch(`${base}/api/disputes/PP-R-PGV-10190981`)).json();
     assert.equal(a.paypalRejected.length, 5);
     assert.notEqual(a.recommendation.evidenceType, 'PROOF_OF_FULFILLMENT');
-    assert.match(a.recommendation.reasons[0], /already refused PROOF_OF_FULFILLMENT/);
+    assert.match(a.recommendation.reasons[0], /already refused "Proof of shipment \/ delivery"/);
     const sub = await (await fetch(`${base}/api/disputes/PP-R-PGV-10190981/submit`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'provide_evidence', evidenceType: 'PROOF_OF_FULFILLMENT', approved: true, confirm: 'APPROVE', packHash: 'x' }) })).json();
     assert.equal(sub.error, 'TYPE_REFUSED_BY_PAYPAL');

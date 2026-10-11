@@ -48,6 +48,28 @@ export const LABELS = {
     make_offer: 'Make an offer', escalate: 'Escalate to a claim', send_message: 'Message the buyer', acknowledge_return_item: 'Confirm return received',
     require_evidence: 'Sandbox: request evidence', adjudicate: 'Sandbox: settle case',
   },
+  rec: { FIGHT: 'Send evidence', OFFER: 'Make an offer', ACCEPT: 'Accept and refund the buyer', WAIT: 'Wait, nothing to send yet', UNRECOGNISED: 'Not recognised' },
+  tool: {
+    list_disputes: 'Looked up disputes', get_dispute: 'Read the dispute', get_order: 'Read the order', get_shipment_tracking: 'Read shipment tracking',
+    get_refund: 'Read refunds', list_transactions: 'Read transactions', accept_dispute_claim: 'Accept the claim (refunds the buyer)',
+    create_refund: 'Refund the buyer', create_shipment_tracking: 'Add shipment tracking', propose_provide_evidence: 'Send evidence',
+    propose_make_offer: 'Make an offer', create_dispute: 'Open a dispute', update_dispute: 'Change the dispute',
+  },
+  refusal: {
+    NOT_A_RECORDED_FACT: 'Not a fact from the linked PayPal record', VALUE_NOT_IN_CITED_RECORD: 'An amount, date or id is not in the linked record (or the currency differs)',
+    TEXT_AFTER_CITATION: 'Extra text after the citation', OUTCOME_CLAIM: 'Predicts or claims an outcome', LATE_TRACKING: 'Tracking added after the dispute opened',
+    NOT_A_SELLER_REFUND: 'Not a refund issued by the seller', NO_LINKED_RECORD: 'No linked PayPal record', UNKNOWN_RECORD: 'Linked record was not fetched',
+    EMPTY_CLAIM: 'Empty sentence', UNKNOWN_FACT: 'Fact id not in the catalog', HIDDEN_CHARACTERS: 'Contains hidden or look-alike characters',
+  },
+  binding: {
+    WAIT_MEANS_NO_ACTION: 'The final recommendation was to wait, so no action can be proposed', ACTION_INCONSISTENT_WITH_RECOMMENDATION: 'Does not match the final recommendation',
+    ACTION_NOT_OFFERED: 'PayPal does not offer this action now', DIFFERENT_DISPUTE: 'Points at a different dispute', DIFFERENT_CAPTURE: 'Points at a different payment',
+    DIFFERENT_ORDER: 'Points at a different order', AMOUNT_ABOVE_DISPUTED: 'More than the disputed amount', AMOUNT_BELOW_0_01: 'Less than 0.01',
+    AMOUNT_NOT_A_PLAIN_DECIMAL: 'Amount is not a plain number', CURRENCY_MISMATCH: 'Different currency from the dispute', TOOL_NOT_PROPOSABLE: 'This action is never proposed from a dispute',
+    ONE_PROPOSAL_PER_RUN: 'Only one action is proposed per run', TYPE_REFUSED_BY_PAYPAL: 'PayPal already refused this evidence type', TYPE_NOT_REQUESTED: 'PayPal did not ask for this evidence type',
+    DISPUTE_CLOSED: 'The case is already closed', PAYPAL_DATA_CHANGED: 'PayPal data changed since the proposal',
+    NO_SELLER_CAPTURE: 'The dispute names no seller payment to refund', LATE_TRACKING_NOT_PROOF: 'Tracking added now would not be proof of shipment',
+  },
   source: { SUBMITTED_BY_BUYER: 'Buyer', SUBMITTED_BY_SELLER: 'You (seller)', SUBMITTED_BY_PARTNER: 'Partner', REQUESTED_FROM_SELLER: 'PayPal asked you', REQUESTED_FROM_BUYER: 'PayPal asked buyer' },
   protection: { EXPANDED_SELLER_PROTECTION: 'Expanded Seller Protection', SELLER_PROTECTION: 'Seller Protection' },
   paypalStatus: {
