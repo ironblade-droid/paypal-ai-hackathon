@@ -1,0 +1,63 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ProofPilot orders and shipping</title><link rel="stylesheet" href="/app.css"><script src="/common.js"></script>
+<script src="/vendor/ag-grid/ag-grid-community.min.js"></script></head>
+<body><main>
+<div id="cfg"></div>
+<h1>Orders & shipping</h1>
+<p class="muted">Before you ship, ProofPilot re-reads the order and capture from PayPal and flags anything that can void Seller Protection. Shipping adds tracking through PayPal Shipment Tracking, then reads the tracker back.</p>
+<div class="card"><label>Load a captured PayPal order by ID</label><input id="loadId" placeholder="e.g. 9H859131RH898413F" size="28"> <button class="sec" id="loadBtn">Load & check</button></div>
+<div id="grid" class="ag-theme-quartz" style="height:300px"></div>
+<div class="grid2" style="margin-top:16px">
+ <div class="card"><h2>Ship order <span id="shipId" class="chip">select a row</span></h2>
+  <label>Ship-to address (prefilled from the PayPal order; editing it simulates a buyer redirect)</label>
+  <input id="a1" placeholder="Address line 1" style="width:100%"><div style="display:flex;gap:6px;margin-top:6px"><input id="city" placeholder="City"><input id="state" placeholder="State" size="4"><input id="zip" placeholder="Postal" size="8"><input id="cc" placeholder="CC" size="3"></div>
+  <label><input type="checkbox" id="sig"> Signature confirmation purchased</label>
+  <div style="display:flex;gap:6px"><div><label>Carrier</label><select id="carrier"><option>USPS</option><option>UPS</option><option>FEDEX</option><option>DHL</option></select></div>
+  <div><label>Tracking number</label><input id="trk" placeholder="sandbox test number"></div></div>
+  <p><button class="sec" id="checkBtn" disabled>Run pre-ship check</button> <button id="shipBtn" disabled>Add tracking to PayPal</button></p>
+  <div id="override" style="display:none"><label>Blocking issues found. To ship anyway, type: I understand Seller Protection may not apply</label><input id="ack" style="width:100%"></div>
+ </div>
+ <div class="card"><h2>Pre-ship check</h2><div id="risk" class="muted">Select an order.</div></div>
+</div>
+</main>
+<script>
+PP.nav('/seller');
+let current = null; let grid;
+const flagsHtml = (risk) => `<div><b>Readiness ${risk.score}/100</b> ${risk.ok ? '✅ safe to ship' : '⛔ fix before shipping'}</div>` +
+  risk.flags.map(f => `<div style="margin:4px 0"><span class="sev-${f.severity}">${f.severity}</span> ${PP.esc(f.message)} <a href="${f.cite}" target="_blank" rel="noopener">policy</a></div>`).join('');
+function fill(o) {
+  current = o; document.getElementById('shipId').textContent = o.id;
+  const a = o.shipping?.address || {};
+  for (const [k, v] of [['a1', a.address_line_1], ['city', a.admin_area_2], ['state', a.admin_area_1], ['zip', a.postal_code], ['cc', a.country_code]]) document.getElementById(k).value = v || '';
+  document.getElementById('checkBtn').disabled = document.getElementById('shipBtn').disabled = false;
+  document.getElementById('risk').innerHTML = o.risk ? flagsHtml(o.risk) : 'No check yet.';
+}
+const shipTo = () => ({ address_line_1: a1.value, admin_area_2: city.value, admin_area_1: state.value, postal_code: zip.value, country_code: cc.value });
+async function load() { grid.setGridOption('rowData', await PP.api('/api/orders')); }
+(async () => {
+  await PP.configBanner(document.getElementById('cfg'));
+  grid = agGrid.createGrid(document.getElementById('grid'), {
+    columnDefs: [
+      { field: 'id', headerName: 'Order', width: 190 }, { field: 'sku', width: 100 },
+      { headerName: 'Amount', valueGetter: p => p.data.amount ? `${p.data.amount.currency_code} ${p.data.amount.value}` : '', width: 120 },
+      { field: 'captureStatus', headerName: 'Capture', width: 120 },
+      { headerName: 'Seller Protection', valueGetter: p => p.data.sellerProtection?.status || '', width: 150 },
+      { headerName: 'Readiness', valueGetter: p => p.data.risk?.score ?? null, width: 110, cellStyle: p => ({ color: p.value == null ? '' : p.value >= 80 ? '#127a3d' : p.value >= 50 ? '#a15c00' : '#b3261e', fontWeight: 700 }) },
+      { headerName: 'Flags', valueGetter: p => (p.data.risk?.flags || []).filter(f => f.severity !== 'INFO').map(f => f.code).join(', '), flex: 1 },
+      { headerName: 'Tracking', valueGetter: p => p.data.tracking ? `${p.data.tracking.carrier} ${p.data.tracking.trackingNumber}` : '—', width: 200 },
+    ],
+    rowSelection: 'single', onRowClicked: e => fill(e.data), defaultColDef: { sortable: true, filter: true, resizable: true },
+  });
+  load();
+})();
+loadBtn.onclick = async () => { try { const r = await PP.api(`/api/orders/${encodeURIComponent(loadId.value.trim())}/risk-check`, { method: 'POST', body: {} }); await load();
+  fill({ id: r.orderId, shipping: r.orderShipping, risk: r.risk }); } catch (e) { risk.innerHTML = `<div class="banner err">${PP.esc(e.message)}</div>`; } };
+checkBtn.onclick = async () => { const r = await PP.api(`/api/orders/${current.id}/risk-check`, { method: 'POST', body: { shipTo: shipTo(), signatureConfirmation: sig.checked } });
+  risk.innerHTML = flagsHtml(r.risk); override.style.display = r.risk.ok ? 'none' : 'block'; load(); };
+shipBtn.onclick = async () => {
+  try { const r = await PP.api(`/api/orders/${current.id}/ship`, { method: 'POST', body: { carrier: carrier.value, trackingNumber: trk.value.trim(), shipTo: shipTo(), signatureConfirmation: sig.checked, overrideAck: ack.value || undefined } });
+    risk.innerHTML = flagsHtml(r.risk) + (r.dryRun ? '<div class="banner info">Dry run: tracking not sent.</div>' : `<h2 style="margin-top:10px">Tracker read back from PayPal</h2>${r.trackers.map(t => `<div><span class="chip">${PP.esc(t.carrier)} ${PP.esc(t.tracking_number)}</span> ${PP.esc(t.status)}</div>`).join('') || 'none returned'}`);
+    load();
+  } catch (e) { risk.innerHTML = (e.data?.risk ? flagsHtml(e.data.risk) : '') + `<div class="banner err">${PP.esc(e.message)}</div>`; if (e.data?.risk) override.style.display = 'block'; }
+};
+</script></body></html>

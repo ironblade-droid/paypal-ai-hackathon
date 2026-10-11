@@ -1,0 +1,114 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ProofPilot dispute</title><link rel="stylesheet" href="/app.css"><script src="/common.js"></script></head>
+<body><main>
+<div id="cfg"></div>
+<p><a href="/disputes">← Dispute queue</a></p>
+<div id="head" class="card">Loading dispute from PayPal…</div>
+<div id="waiting"></div>
+<div class="grid2">
+  <div class="card" id="rec"></div>
+  <div class="card" id="what"></div>
+</div>
+<div class="card" id="pack"></div>
+<div class="card" id="approve"></div>
+<div id="sandboxTools"></div>
+<div class="grid2"><div class="card" id="records"></div><div class="card" id="history"></div></div>
+</main>
+<script>
+PP.nav('/disputes');
+const id = decodeURIComponent(location.pathname.split('/').pop());
+let A = null; let type = null; let pollTimer = null;
+const refChip = (r) => `<span class="chip">${PP.esc(r.type)} ${PP.esc(r.id)}</span>`;
+
+function currentPack() { return type === 'SUPPORTING_INFO' ? A.supporting : A.packs[type]; }
+
+function render() {
+  const s = A.status; const dl = A.deadline;
+  head.innerHTML = `<h1>${PP.esc(A.id)} ${PP.badge(s.label, s.tone)}</h1>
+    <div>${PP.esc(A.reason)} · <b>${PP.esc(A.amount.currency_code)} ${PP.esc(A.amount.value)}</b> · stage ${PP.esc(A.stage)} · PayPal status <span class="chip">${PP.esc(A.paypalStatus)}</span></div>
+    <div>${dl ? `Respond by <b>${new Date(dl.due).toLocaleString()}</b> (${dl.overdue ? '<span class="sev-BLOCK">overdue</span>' : `${dl.hoursLeft} h left`})` : '<span class="muted">No seller response deadline set by PayPal right now.</span>'}</div>
+    <small>${PP.esc(s.detail || '')}</small>`;
+  waiting.innerHTML = s.waiting ? `<div class="banner wait">⏳ <b>Waiting for PayPal.</b> ${PP.esc(s.detail)} Last checked ${new Date().toLocaleTimeString()}.</div>` : '';
+
+  const r = A.recommendation;
+  rec.innerHTML = `<h2>Recommendation: ${PP.esc(r.action)}${r.evidenceType ? ` with ${PP.esc(r.evidenceType)}` : ''}</h2>
+    <ul>${r.reasons.map(x => `<li>${PP.esc(x)}</li>`).join('')}</ul>
+    <small>Engine: ${PP.esc(r.engine)} (deterministic rules, not an LLM). You decide; nothing is sent without your approval.</small>`;
+
+  what.innerHTML = `<h2>What PayPal is asking for</h2>
+    ${A.allowedTypes.length ? A.allowedTypes.map(t => `<span class="chip">${PP.esc(t)}</span>`).join('') : '<div class="muted">PayPal is not requesting any evidence type right now.</div>'}
+    <div style="margin-top:8px">Actions PayPal offers: ${s.actions.length ? s.actions.map(a => `<span class="chip">${PP.esc(a)}</span>`).join('') : '<span class="muted">none</span>'}</div>
+    <div style="margin-top:8px">Seller Protection: ${A.transaction.protectionEligible ? 'eligible (' + PP.esc(A.transaction.protectionType) + ')' : 'not listed as eligible'}</div>
+    ${A.gaps.map(g => `<div class="gap">${PP.esc(g.message)}</div>`).join('')}`;
+
+  // Types offered are only those the dispute lists, plus supporting info when PayPal offers that action.
+  const types = [...A.allowedTypes, ...(A.supporting ? ['SUPPORTING_INFO'] : [])];
+  if (!types.includes(type)) type = r.evidenceType && types.includes(r.evidenceType) ? r.evidenceType : types[0] || null;
+  const p = type ? currentPack() : null;
+  pack.innerHTML = `<h2>Evidence pack</h2>` + (!p ? '<div class="muted">No evidence can be sent right now: PayPal has not requested any evidence type and offers no supporting-info action.</div>' :
+    `<label>Pack type: only evidence types this dispute requests, plus SUPPORTING_INFO when PayPal offers that action</label><select id="typeSel">${types.map(t => `<option ${t === type ? 'selected' : ''}>${t}</option>`).join('')}</select>
+     <div style="margin-top:8px">${p.validation.accepted.map(c => `<div class="claim"><label style="display:inline"><input type="checkbox" class="cl" value="${PP.esc(c.id)}" checked></label> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('')}
+     ${p.validation.rejected.map(x => `<div class="claim bad">Refused by checker: ${PP.esc(x.claimId)} (${PP.esc(x.reason)})</div>`).join('')}
+     ${p.gaps.map(g => `<div class="gap">Gap: ${PP.esc(g.message)}</div>`).join('')}
+     ${type !== 'SUPPORTING_INFO' && !p.requirementMet ? `<div class="banner err">This pack lacks the record ${PP.esc(type)} needs, so it cannot be submitted.</div>` : ''}</div>
+     <h2 style="margin-top:12px">Add your own statement</h2><small>The checker refuses any statement that does not cite a record ProofPilot fetched from PayPal.</small>
+     <div style="display:flex;gap:6px;margin-top:6px"><input id="ctext" placeholder="e.g. Buyer was emailed the tracking link" style="flex:1">
+     <select id="cref"><option value="">(no record)</option>${A.records.map(x => `<option value="${PP.esc(x.type)}|${PP.esc(x.id)}">${PP.esc(x.type)} ${PP.esc(x.id)}</option>`).join('')}</select>
+     <button class="sec" id="addBtn">Check & add</button></div><div id="custom"></div>`);
+  if (p) { typeSel.onchange = () => { type = typeSel.value; custom = []; render(); }; addBtn.onclick = addClaim; drawCustom(); }
+  renderApprove();
+  sandboxTools.innerHTML = A.sandboxLinks.includes('require_evidence') ? `<div class="card"><h2>Sandbox test tool</h2>
+    <p class="muted">PayPal's sandbox offers <span class="chip">require_evidence</span> on this case. It simulates PayPal asking the seller for evidence, so the evidence flow can be demonstrated on an existing dispute. ProofPilot never calls <span class="chip">adjudicate</span> and never shows an outcome it did not get from PayPal.</p>
+    <button class="sec" id="reqEv">Sandbox: simulate PayPal requesting seller evidence</button> <span id="reqOut"></span></div>` : '';
+  if (window.reqEv) reqEv.onclick = async () => { try { const r = await PP.api(`/api/sandbox/disputes/${encodeURIComponent(id)}/require-evidence`, { method: 'POST', body: {} });
+    reqOut.textContent = `${r.before} → ${r.after}`; setTimeout(refresh, 2000); } catch (e) { reqOut.textContent = e.message; } };
+
+  records.innerHTML = `<h2>Records fetched from PayPal</h2><table class="simple"><tr><th>Type</th><th>ID</th><th>Source</th></tr>${A.records.map(x => `<tr><td>${PP.esc(x.type)}</td><td><span class="chip">${PP.esc(x.id)}</span></td><td><small>${PP.esc(x.source)}</small></td></tr>`).join('')}</table>`;
+  history.innerHTML = `<h2>Case history (from PayPal)</h2><table class="simple"><tr><th>When</th><th>Who</th><th>What</th><th>Stage</th></tr>${A.history.map(h => `<tr><td>${new Date(h.date).toLocaleString()}</td><td>${PP.esc(h.source)}</td><td>${PP.esc(h.action || h.type)}</td><td>${PP.esc(h.stage)}</td></tr>`).join('')}</table>`;
+}
+
+let custom = [];
+function drawCustom() { document.getElementById('custom').innerHTML = custom.map(c => `<div class="claim">${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join(''); }
+async function addClaim() {
+  const [t, i] = (cref.value || '|').split('|'); const claim = { id: 'custom-' + (custom.length + 1), text: ctext.value, refs: t ? [{ type: t, id: i }] : [] };
+  const v = await PP.api(`/api/disputes/${encodeURIComponent(id)}/check`, { method: 'POST', body: { claims: [claim] } });
+  if (v.ok) { custom.push(claim); ctext.value = ''; drawCustom(); renderApprove(); }
+  else document.getElementById('custom').insertAdjacentHTML('beforeend', `<div class="claim bad">Refused: "${PP.esc(claim.text)}" (${PP.esc(v.rejected[0].reason)}). Link it to a PayPal record.</div>`);
+}
+
+function selectedClaims() { const p = currentPack(); const keep = [...document.querySelectorAll('.cl:checked')].map(x => x.value);
+  return { exclude: p.validation.accepted.filter(c => !keep.includes(c.id)).map(c => c.id), claims: [...p.validation.accepted.filter(c => keep.includes(c.id)), ...custom] }; }
+
+async function sha16(s) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('').slice(0, 16); }
+
+function renderApprove() {
+  const s = A.status; const acts = s.actions; const p = type ? currentPack() : null;
+  const evidenceAction = type === 'SUPPORTING_INFO' ? 'provide_supporting_info' : 'provide_evidence';
+  const canEvidence = p && acts.includes(evidenceAction) && (type === 'SUPPORTING_INFO' || p.requirementMet);
+  approve.innerHTML = `<h2>Approve and submit</h2>
+    ${canEvidence ? `<p>Submit this <b>${PP.esc(type)}</b> pack via <span class="chip">${evidenceAction}</span>. A PDF of the cited pack is attached.</p>` : `<p class="muted">Evidence submission is not available: ${p ? `PayPal does not offer ${evidenceAction} now${p.requirementMet || type === 'SUPPORTING_INFO' ? '' : ' and the pack is incomplete'}.` : 'no pack.'}</p>`}
+    ${acts.includes('make_offer') ? `<p>Offer amount (${PP.esc(A.amount.currency_code)}): <input id="offerAmt" size="8" placeholder="${PP.esc(A.amount.value)}"></p>` : ''}
+    <label>Type APPROVE to confirm you reviewed every statement</label><input id="conf" size="12">
+    <p>${canEvidence ? '<button id="subEv">Submit to PayPal</button> ' : ''}${acts.includes('make_offer') ? '<button class="sec" id="subOffer">Make offer</button> ' : ''}${acts.includes('accept_claim') ? '<button class="sec" id="subAccept">Accept claim (refund)</button>' : ''}</p>
+    <div id="out"></div>`;
+  const go = async (body) => {
+    out.innerHTML = 'Submitting to PayPal…';
+    try { const r = await PP.api(`/api/disputes/${encodeURIComponent(id)}/submit`, { method: 'POST', body: { ...body, approved: true, confirm: conf.value } });
+      out.innerHTML = `<div class="banner info">${r.dryRun ? 'Dry run, nothing sent. ' : 'Sent to PayPal. '}Status: ${PP.badge(r.before.label, 'wait')} → ${PP.badge(r.after.label, 'review')}</div><pre>${PP.esc(JSON.stringify(r.payloadPreview, null, 2))}</pre>`;
+      setTimeout(refresh, 3000);
+    } catch (e) { out.innerHTML = `<div class="banner err">${PP.esc(e.message)}${e.data?.rejected ? '<pre>' + PP.esc(JSON.stringify(e.data.rejected, null, 2)) + '</pre>' : ''}</div>`; }
+  };
+  if (window.subEv) subEv.onclick = async () => { const { exclude, claims } = selectedClaims();
+    const canon = JSON.stringify({ disputeId: A.id, evidenceType: type, claims: claims.map(c => ({ id: c.id, text: c.text, refs: c.refs })) });
+    go({ action: evidenceAction, evidenceType: type === 'SUPPORTING_INFO' ? undefined : type, excludeClaimIds: exclude, customClaims: custom, packHash: await sha16(canon) }); };
+  if (window.subOffer) subOffer.onclick = () => go({ action: 'make_offer', offerAmount: offerAmt.value });
+  if (window.subAccept) subAccept.onclick = () => go({ action: 'accept_claim' });
+}
+
+async function refresh() {
+  try { A = await PP.api(`/api/disputes/${encodeURIComponent(id)}`); render();
+    clearTimeout(pollTimer); if (A.status.waiting) pollTimer = setTimeout(refresh, 15000);
+  } catch (e) { head.innerHTML = `<div class="banner err">${PP.esc(e.message)}${e.data?.debugId ? ' (debug_id ' + PP.esc(e.data.debugId) + ')' : ''}</div>`; }
+}
+PP.configBanner(document.getElementById('cfg')).then(refresh);
+</script></body></html>

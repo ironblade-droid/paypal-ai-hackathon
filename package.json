@@ -1,0 +1,24 @@
+{
+  "name": "proofpilot",
+  "version": "0.1.0",
+  "description": "Dispute-prevention and record-cited evidence assistant for small PayPal sellers (PayPal sandbox).",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js",
+    "test:unit": "node --test test/engine.test.js test/app.test.js",
+    "test:sandbox": "node --test test/sandbox.integration.test.js",
+    "secret-scan": "bash scripts/secret-scan.sh"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ag-grid-community": "^32.3.9",
+    "express": "^4.22.3"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,43 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ProofPilot demo shop (PayPal sandbox)</title><link rel="stylesheet" href="/app.css"><script src="/common.js"></script></head>
+<body><main>
+<div id="cfg"></div>
+<h1>Demo shop</h1>
+<p class="muted">A test store for the seller side of ProofPilot. Checkout uses the real PayPal JS SDK in sandbox. Orders are created and captured by our backend (Orders v2). Log in with a <b>sandbox buyer</b> account.</p>
+<div class="products" id="products"></div>
+<div class="grid2" style="margin-top:16px">
+  <div class="card"><h2>Checkout</h2><div id="selected" class="muted">Pick a product.</div><div id="paypal-buttons" style="margin-top:12px;max-width:380px"></div></div>
+  <div class="card"><h2>Result</h2><div id="result" class="muted">No order yet.</div></div>
+</div>
+</main>
+<script>
+PP.nav('/');
+let selected = null;
+(async () => {
+  const cfg = await PP.configBanner(document.getElementById('cfg'));
+  const products = await PP.api('/api/catalog');
+  const box = document.getElementById('products');
+  box.innerHTML = products.map(p => `<div class="card product" data-sku="${p.sku}"><b>${PP.esc(p.name)}</b><div>USD ${p.price}</div><small>${PP.esc(p.note || p.type)}</small></div>`).join('');
+  box.onclick = (e) => { const c = e.target.closest('.product'); if (!c) return; selected = c.dataset.sku;
+    box.querySelectorAll('.product').forEach(x => x.classList.toggle('sel', x === c));
+    document.getElementById('selected').textContent = 'Selected: ' + products.find(p => p.sku === selected).name; };
+  if (!cfg.credentials) return;
+  const s = document.createElement('script');
+  s.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(cfg.clientId)}&currency=USD&intent=capture&components=buttons`;
+  s.onload = () => paypal.Buttons({
+    style: { layout: 'vertical', label: 'paypal' },
+    createOrder: async () => { if (!selected) { alert('Pick a product first'); throw new Error('no product'); }
+      return (await PP.api('/api/orders', { method: 'POST', body: { sku: selected, quantity: 1 } })).id; },
+    onApprove: async (data) => {
+      const r = await PP.api(`/api/orders/${data.orderID}/capture`, { method: 'POST' });
+      const flags = r.risk.flags.map(f => `<div class="sev-${f.severity}">${f.severity}: <span style="font-weight:400">${PP.esc(f.message)}</span></div>`).join('');
+      document.getElementById('result').innerHTML = `<div>Order <span class="chip">${r.id}</span> ${PP.esc(r.status)}</div>
+        <div>Capture <span class="chip">${PP.esc(r.captureId)}</span> ${PP.esc(r.captureStatus)}</div>
+        <h2 style="margin-top:10px">Pre-ship readiness: ${r.risk.score}/100</h2>${flags}
+        <p><a href="/seller">Open in Orders & shipping →</a></p>`;
+    },
+    onError: (err) => { document.getElementById('result').innerHTML = `<div class="banner err">${PP.esc(err.message || err)}</div>`; },
+  }).render('#paypal-buttons');
+  document.head.appendChild(s);
+})();
+</script></body></html>

@@ -1,0 +1,20 @@
+# Render Blueprint (COULD). Secrets are set in the Render dashboard, never in this file.
+services:
+  - type: web
+    name: proofpilot
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PAYPAL_SANDBOX_CLIENT_ID
+        sync: false
+      - key: PAYPAL_SANDBOX_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_SANDBOX_WEBHOOK_ID
+        sync: false
+      - key: PROOFPILOT_DATA_FILE
+        value: /tmp/proofpilot-store.json
