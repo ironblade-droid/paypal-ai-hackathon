@@ -26,17 +26,17 @@ test('provider selection and default models', () => {
   assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).provider, 'gemini');
   assert.equal(createLlmProvider({ GROQ_API_KEY: 'q-key-1234567890' }).provider, 'groq');
   assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890', GROQ_API_KEY: 'q-key-1234567890', PROOFPILOT_LLM_PROVIDER: 'groq' }).provider, 'groq');
-  assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).model, DEFAULT_MODELS.gemini); assert.equal(DEFAULT_MODELS.gemini, 'gemini-3.8-flash');
+  assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).model, DEFAULT_MODELS.gemini); assert.equal(DEFAULT_MODELS.gemini, 'gemini-3.5-flash');
   assert.equal(createLlmProvider({ GROQ_API_KEY: 'q-key-1234567890', GROQ_MODEL: 'x/y' }).model, 'x/y');
 });
 
 test('gemini request shape (mocked fetch): key in header, JSON mime type, parses candidates', async () => {
   let seen;
   const fetchImpl = async (url, init) => { seen = { url, init }; return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"action":"WAIT"}' }] } }] }), { status: 200 }); };
-  const p = geminiProvider({ apiKey: 'gem-test-key-123456', model: 'gemini-3.8-flash', fetchImpl });
+  const p = geminiProvider({ apiKey: 'gem-test-key-123456', model: 'gemini-3.5-flash', fetchImpl });
   const r = await p.completeJSON({ system: 's', user: 'u' });
   assert.deepEqual(r.json, { action: 'WAIT' });
-  assert.match(seen.url, /models\/gemini-3\.8-flash:generateContent$/);
+  assert.match(seen.url, /models\/gemini-3\.5-flash:generateContent$/);
   assert.equal(seen.init.headers['x-goog-api-key'], 'gem-test-key-123456');
   assert.ok(!seen.url.includes('gem-test-key'), 'key never in URL');
   assert.equal(JSON.parse(seen.init.body).generationConfig.responseMimeType, 'application/json');

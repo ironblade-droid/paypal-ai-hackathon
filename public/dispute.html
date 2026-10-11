@@ -36,7 +36,7 @@ function renderAi() {
       ${AI.flags.map(f => `<div class="gap">${PP.esc(f)}</div>`).join('')}
       <b>Facts behind the recommendation</b>${AI.rationale.accepted.map(c => `<div class="claim">${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || '<div class="muted">No reason the model gave passed the checker.</div>'}
       <b>Facts the model suggests sending</b> <small>(rendered from PayPal record fields; tick to add to the pack)</small>
-      ${AI.narrative.accepted.map(c => `<div class="claim"><input type="checkbox" class="aiPick" value="${PP.esc(c.id)}"> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || '<div class="muted">No drafted sentence passed the checker.</div>'}
+      ${AI.narrative.accepted.map(c => `<div class="claim"><input type="checkbox" class="aiPick" value="${PP.esc(c.id)}"> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || `<div class="muted">${AI.narrative.refused.length ? 'No suggested sentence passed the checker.' : 'The model suggested no facts to send (nothing to send for this recommendation).'}</div>`}
       ${[...AI.rationale.refused, ...AI.narrative.refused].map(x => `<div class="claim bad">Refused by checker (${PP.esc(x.reason)}${x.values ? ': ' + PP.esc(x.values.join(', ')) : ''}): <s>${PP.esc(x.text || x.claimId)}</s></div>`).join('')}
       ${AI.offerAmount ? `<div>Suggested offer: ${PP.esc(A.amount.currency_code)} ${PP.esc(AI.offerAmount)}</div>` : ''}
       <small>${PP.esc(AI.provider)} · ${PP.esc(AI.model)} · ${AI.ms ?? '?'} ms · ${new Date(AI.generatedAt).toLocaleTimeString()}${AI.cached ? ' (cached for this dispute version)' : ''}</small>

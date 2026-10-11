@@ -1,10 +1,10 @@
 // Pluggable LLM providers. Keys come from env only and are registered for redaction; nothing is logged.
-//   Google Gemini: GEMINI_API_KEY, model GEMINI_MODEL (default gemini-3.8-flash: verified live on 11 Oct 2026; gemini-2.5-flash and 2.5-flash-lite answer "no longer available to new users")
+//   Google Gemini: GEMINI_API_KEY, model GEMINI_MODEL (default gemini-3.5-flash: the agent loop was verified end to end on 11 Oct 2026. On this key gemini-2.5-flash and 2.5-flash-lite answer "no longer available to new users", and gemini-3.8-flash was returning 503 high demand / timeouts)
 //   Groq:          GROQ_API_KEY,   model GROQ_MODEL   (default openai/gpt-oss-20b; Groq retired its free Llama models on 16 Aug 2026)
 // Choose with PROOFPILOT_LLM_PROVIDER=gemini|groq when both keys are set (default: gemini).
 import { registerSecret } from '../lib/redact.js';
 
-export const DEFAULT_MODELS = { gemini: 'gemini-3.8-flash', groq: 'openai/gpt-oss-20b' };
+export const DEFAULT_MODELS = { gemini: 'gemini-3.5-flash', groq: 'openai/gpt-oss-20b' };
 
 export class LlmError extends Error { constructor(provider, status, message) { super(`${provider} ${status}: ${message}`); this.provider = provider; this.status = status; } }
 

@@ -56,6 +56,10 @@ test('guardTools: allowlist only; reads wrapped and redacted; writes become prop
   assert.equal(proposals[0].status, 'PENDING_SELLER_APPROVAL');
   assert.deepEqual(activity.map(a => a.kind), ['read', 'write-proposed']);
   assert.ok(!JSON.stringify(activity).includes('buyer@personal.example.com'));
+  // The real toolkit returns JSON strings: those are parsed and redacted too.
+  const { tools: t2 } = guardTools({ get_dispute: { description: 'x', parameters: z.object({}), execute: async () => JSON.stringify({ buyer: { name: 'John Doe', payer_id: 'X5J3U7FY8SRJ', email: 'a@b.co' }, status: 'OPEN' }) } }, { activity: [], proposals: [], disputeId: 'PP-D-1' });
+  const s2 = await t2.get_dispute.execute({}, {});
+  assert.equal(typeof s2, 'string'); assert.deepEqual(JSON.parse(s2), { buyer: { name: '[redacted]', payer_id: '[redacted]', email: '[redacted]' }, status: 'OPEN' });
   assert.ok(READ_TOOLS.includes('list_disputes') && WRITE_TOOLS.includes('create_shipment_tracking'));
 });
 

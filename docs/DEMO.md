@@ -29,5 +29,14 @@ Everything here is PayPal **sandbox** test data.
 - Both trackers on this capture were registered after the dispute opened (09:30:48 UTC by the spike's evidence submission and 10:31:48 UTC by ProofPilot's Ship flow; the case opened 09:22:26 UTC). ProofPilot v0.3 labels them "added after dispute opened" and does not use them as proof of shipment, so this dispute has no complete proof-of-fulfillment pack anyway.
 - `adjudicate` is never called.
 
+## Live agent run (11 Oct 2026, 16:59 to 17:01 IST, dry-run server, sandbox)
+- Setup: Gemini `gemini-3.5-flash` on the PayPal Agent Toolkit 1.11.0, running against PP-R-PGV-10190981 (claim stage, response needed).
+- What the agent did (each run): it called `get_dispute` (read, ran, result redacted), recommended ACCEPT, which agrees with the rules engine, and called `accept_dispute_claim`. That call was recorded as a proposal with status PENDING_SELLER_APPROVAL. **It was not approved or executed:** PayPal still shows the dispute as WAITING_FOR_SELLER_RESPONSE with update_time 10:27:52Z.
+- Checked draft:
+  - The reasons the model gave were facts rendered from the dispute and tracker records, including both "added after dispute opened" tracker facts.
+  - In one earlier run the model also suggested 2 narrative facts (when the case opened, and the disputed amount); both passed the checker.
+  - No free text was accepted.
+- The first runs exposed a redaction gap: the toolkit returns results as JSON strings, so key-based redaction missed the sandbox buyer's name and payer id. This is now fixed (string results are parsed, redacted and re-serialised) and covered by a test. The screenshots were retaken after the fix.
+
 ## Screenshots (`docs/screenshots/`)
-01 queue under review · 02 dispute under review · 03 sandbox require-evidence clicked · 04 queue, response needed · 05 dispute, response needed · 06 evidence pack · 06b checker refuses an uncited claim · 07 approve before submit · 08 submit refused by PayPal (EVIDENCE_TYPE_IS_NOT_ALLOWED) · 09 dispute after refusal, still response needed · 10 queue after refusal · 11 orders & shipping · 12 demo shop · 13 fresh install (dry run, empty local store): the seeded PayPal refusals and the "added after dispute opened" tracker labels are shown, and proof of fulfillment is not offered for submission.
+01 queue under review · 02 dispute under review · 03 sandbox require-evidence clicked · 04 queue, response needed · 05 dispute, response needed · 06 evidence pack · 06b checker refuses an uncited claim · 07 approve before submit · 08 submit refused by PayPal (EVIDENCE_TYPE_IS_NOT_ALLOWED) · 09 dispute after refusal, still response needed · 10 queue after refusal · 11 orders & shipping · 12 demo shop · 13 fresh install (dry run, empty local store): the seeded PayPal refusals and the "added after dispute opened" tracker labels are shown, and proof of fulfillment is not offered for submission · 14 AI advisor with the live Gemini agent's checked draft · 15 Agent activity panel (read ran, accept_dispute_claim proposed only) · 16 full dispute page with the agent.

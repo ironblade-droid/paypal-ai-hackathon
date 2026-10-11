@@ -50,11 +50,13 @@ export function redactDeep(v, depth = 0) {
   if (depth > 12) return '[…]';
   if (Array.isArray(v)) return v.map(x => redactDeep(x, depth + 1));
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'links').map(([k, x]) => [k, PII_KEY.test(k) ? '[redacted]' : redactDeep(x, depth + 1)]));
+  // The toolkit returns most results as a JSON string: parse it so key-based redaction applies, then re-serialise.
+  if (typeof v === 'string' && /^\s*[[{]/.test(v)) { try { return JSON.stringify(redactDeep(JSON.parse(v), depth + 1)); } catch { /* not JSON */ } }
   // Emails and URLs are removed too (document download links are not needed by the model).
   if (typeof v === 'string') return redact(v).replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]').replace(/https?:\/\/\S+/g, '[url]');
   return v;
 }
-const clip = (o, n = 1500) => { const s = JSON.stringify(o ?? null); return s.length > n ? s.slice(0, n) + '…' : s; };
+const clip = (o, n = 1500) => { if (typeof o === 'string') { try { o = JSON.parse(o); } catch { /* plain text */ } } const s = typeof o === 'string' ? o : JSON.stringify(o ?? null); return s.length > n ? s.slice(0, n) + '…' : s; };
 
 // Wrap the toolkit's tools. Returns { tools (what the model may call), held (original write executes, server-side only) }.
 export function guardTools(raw, { activity, proposals, disputeId, toolFactory }) {
