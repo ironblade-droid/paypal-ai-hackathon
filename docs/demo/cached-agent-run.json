@@ -1,0 +1,101 @@
+{
+ "kind": "CACHED_DEMO",
+ "label": "CACHED DEMO RUN: recorded earlier, NOT a live model answer and NOT about the dispute you are viewing",
+ "why": "Shown only when the live model is rate-limited (Gemini free tier: 20 requests per model per day) or no AI key is set, so judges can still see what a real agent run looks like. Nothing in it is re-run, and its proposal cannot be approved.",
+ "recorded_at_ist": "2026-10-11 17:16 IST",
+ "recorded_on_dispute": "PP-R-PGV-10190981",
+ "server_mode_when_recorded": {
+  "dryRun": true,
+  "sandbox": true,
+  "proofpilot": "0.4.0"
+ },
+ "requested_model": "gemini-3-flash-preview",
+ "reported_model": "gemini-3-flash-preview",
+ "reported_model_source": "modelVersion field of each raw Gemini generateContent response (AI SDK step response body), not the id ProofPilot sent",
+ "toolkit": "@paypal/agent-toolkit 1.11.0",
+ "outcome_when_recorded": "Read tools ran (get_dispute, get_order). The agent proposed accept_dispute_claim; ProofPilot bound it to this dispute and replaced the model note with its template. Status PENDING_SELLER_APPROVAL; it was NOT approved and NOT executed. Nothing was sent to PayPal.",
+ "source": "Copied from docs/agent-run-redacted.json (same run, ProofPilot redaction applied; merchant_id redacted). Proposal status replaced with CACHED_NOT_APPROVABLE.",
+ "run": {
+  "at": "2026-10-11T11:46:10.377Z",
+  "model": "gemini-3-flash-preview",
+  "reportedModel": "gemini-3-flash-preview",
+  "toolkit": "@paypal/agent-toolkit 1.11.0",
+  "ok": true,
+  "recommendation": {
+   "action": "ACCEPT",
+   "evidenceType": null,
+   "source": "llm"
+  },
+  "activity": [
+   {
+    "at": "2026-10-11T11:45:44.628Z",
+    "tool": "get_dispute",
+    "kind": "read",
+    "args": {
+     "dispute_id": "PP-R-PGV-10190981"
+    },
+    "ok": true,
+    "ms": 399,
+    "result": "{\"dispute_id\":\"PP-R-PGV-10190981\",\"create_time\":\"2026-10-11T09:22:26.089Z\",\"update_time\":\"2026-10-11T10:27:52.700Z\",\"disputed_transactions\":[{\"buyer_transaction_id\":\"77W70831A6213602F\",\"seller_transaction_id\":\"1AU666173Y707472F\",\"create_time\":\"2026-10-11T09:06:31.000Z\",\"transaction_status\":\"HELD\",\"gross_amount\":{\"currency_code\":\"USD\",\"value\":\"5.50\"},\"buyer\":{\"email\":\"[redacted]\",\"payer_id\":\"[redacted]\",\"name\":\"[redacted]\"},\"seller\":{\"email\":\"[redacted]\",\"merchant_id\":\"[redacted]\",\"name\":\"[redacted]\"},\"seller_protection_eligible\":true,\"seller_protection_type\":\"EXPANDED_SELLER_PROTECTION\"}],\"reason\":\"MERCHANDISE_OR_SERVICE_NOT_RECEIVED\",\"status\":\"WAITING_FOR_SELLER_RESPONSE\",\"dispute_amount\":{\"currency_code\":\"USD\",\"value\":\"5.50\"},\"dispute_state\":\"REQUIRED_ACTION\",\"fund_movements\":[{\"party\":\"RECEIVER\",\"amount\":{\"currency_code\":\"USD\",\"value\":\"4.82\"},\"initiated_time\":\"2026-10-11T09:25:32.000Z\",\"type\":\"DEBIT\",\"reason\":\"HOLD_PLACED\"}],\"dispute_life_cycle_stage\":\"CHARGEBACK\",\"dispute_channel\":\"INTERNAL\",\"extensions\":{\"merchant_contacted\":true,\"merchant_contacted_outcome\":\"NO_RESPONSE\",\"buyer_contacted_time\":\"2026-10-11T09:22:25.418Z\",\"merchandize_dispute_properties\":{\"issue_type\":\"PRODUCT\"}},\"evidences\":[{\"evidence_type\":\"CREATE\",\"source\":\"SUBMITTED_BY_BUYER\",\"date\":\"2026-10-11T09:22:26.089Z\",\"dispute_life_cycle_stage\":\"INQUIRY\"},{\"evidence_type\":\"PROOF_OF_FULFILLMENT\",\"evidence_info\":{\"tracking_info\":[{\"carrier_name\":\"USPS\",\"tracking_number\":\"9400100000000000000001\"}]},\"documents…"
+   },
+   {
+    "at": "2026-10-11T11:45:44.663Z",
+    "tool": "get_order",
+    "kind": "read",
+    "args": {
+     "id": "9H859131RH898413F"
+    },
+    "ok": true,
+    "ms": 434,
+    "result": "{\"id\":\"9H859131RH898413F\",\"intent\":\"CAPTURE\",\"status\":\"COMPLETED\",\"payment_source\":{\"paypal\":{\"email_address\":\"[redacted]\",\"account_id\":\"[redacted]\",\"account_status\":\"VERIFIED\",\"name\":\"[redacted]\",\"address\":\"[redacted]\"}},\"purchase_units\":[{\"reference_id\":\"default\",\"amount\":{\"currency_code\":\"USD\",\"value\":\"5.50\",\"breakdown\":{}},\"payee\":{\"email_address\":\"[redacted]\",\"merchant_id\":\"[redacted]\"},\"description\":\"ProofPilot dispute test\",\"shipping\":{\"name\":\"[redacted]\",\"address\":\"[redacted]\",\"trackers\":[{\"id\":\"1AU666173Y707472F-9400111899562537866358\",\"status\":\"SHIPPED\",\"items\":[],\"notify_payer\":false}]},\"payments\":{\"captures\":[{\"id\":\"1AU666173Y707472F\",\"status\":\"PENDING\",\"status_details\":{\"reason\":\"BUYER_COMPLAINT\"},\"amount\":{\"currency_code\":\"USD\",\"value\":\"5.50\"},\"final_capture\":true,\"seller_protection\":{\"status\":\"ELIGIBLE\",\"dispute_categories\":[\"ITEM_NOT_RECEIVED\",\"UNAUTHORIZED_TRANSACTION\"]},\"create_time\":\"2026-10-11T09:06:31Z\",\"update_time\":\"2026-10-11T09:31:05Z\"}],\"refunds\":[{\"id\":\"44V27761ED882372G\",\"amount\":{\"currency_code\":\"USD\",\"value\":\"4.82\"},\"seller_payable_breakdown\":{\"gross_amount\":{\"currency_code\":\"USD\",\"value\":\"4.82\"},\"paypal_fee\":{\"currency_code\":\"USD\",\"value\":\"0.00\"},\"platform_fees\":[{\"amount\":{\"currency_code\":\"USD\",\"value\":\"0.00\"}}],\"net_amount\":{\"currency_code\":\"USD\",\"value\":\"4.82\"},\"total_refunded_amount\":{\"currency_code\":\"USD\",\"value\":\"0.00\"}},\"status\":\"PENDING\",\"create_time\":\"2026-10-11T02:25:32-07:00\",\"update_time\":\"2026-10-11T02:25:32-07:00\"}]}}],\"payer\":{…"
+   },
+   {
+    "at": "2026-10-11T11:46:04.315Z",
+    "tool": "accept_dispute_claim",
+    "kind": "write-proposed",
+    "args": {
+     "fields": [
+      "dispute_id",
+      "note"
+     ]
+    },
+    "ok": true,
+    "ms": 0,
+    "result": "{\"status\":\"PROPOSED_NOT_EXECUTED\",\"proposal_id\":\"prop-c4f063a5\",\"message\":\"Recorded for ProofPilot to check and the seller to approve. Nothing was sent to PayPal.\"}"
+   }
+  ],
+  "proposals": [
+   {
+    "id": "prop-c4f063a5",
+    "at": "2026-10-11T11:46:04.315Z",
+    "disputeId": "PP-R-PGV-10190981",
+    "tool": "accept_dispute_claim",
+    "kind": "toolkit-write",
+    "modelFields": [
+     "dispute_id",
+     "note"
+    ],
+    "status": "CACHED_NOT_APPROVABLE",
+    "canonical": {
+     "dispute_id": "PP-R-PGV-10190981",
+     "note": "Seller-approved-accept-via-ProofPilot-PP-R-PGV-10190981"
+    },
+    "bound": {
+     "disputeId": "PP-R-PGV-10190981",
+     "captureId": "1AU666173Y707472F",
+     "orderId": "9H859131RH898413F",
+     "disputedAmount": {
+      "currency_code": "USD",
+      "value": "5.50"
+     }
+    },
+    "finalAction": "ACCEPT",
+    "description": "Accept the claim on case PP-R-PGV-10190981. PayPal refunds the buyer the disputed USD 5.50 and the case closes.",
+    "executable": true,
+    "hash": "86758c7d6b7a53f5b396cdb25328b9ce8c684f5d3c27bbafbb3725ae2202765c",
+    "recordedStatus": "PENDING_SELLER_APPROVAL"
+   }
+  ],
+  "flags": []
+ }
+}

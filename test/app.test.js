@@ -58,7 +58,7 @@ test('submit: custom claim citing a fetched record is accepted (hash includes it
   const api = fakeApi(); const { s, base } = await start(api, { dryRun: true });
   const a = (await j(base, '/api/disputes/PP-D-1')).body; const p = a.packs.PROOF_OF_FULFILLMENT;
   const custom = { id: 'custom-1', text: 'Order paid in full', refs: [{ type: 'order', id: 'ORD123' }], source: 'seller' };
-  const hash = packHash('PP-D-1', 'PROOF_OF_FULFILLMENT', [...p.validation.accepted, custom]);
+  const hash = packHash('PP-D-1', 'PROOF_OF_FULFILLMENT', [...p.validation.accepted.filter(c => !c.untrusted), custom]); // buyer quotes are not ticked by default
   const r = await j(base, '/api/disputes/PP-D-1/submit', { action: 'provide_evidence', evidenceType: 'PROOF_OF_FULFILLMENT', customClaims: [custom], packHash: hash, approved: true, confirm: 'APPROVE' });
   assert.equal(r.status, 200, JSON.stringify(r.body)); assert.equal(r.body.dryRun, true);
   assert.match(r.body.payloadPreview.evidences[0].notes, /Seller's own statement: Order paid in full \[order ORD123\]/);

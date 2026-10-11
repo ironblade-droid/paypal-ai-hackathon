@@ -7,7 +7,8 @@ import { CATALOG, findSku } from './catalog.js';
 import { checkShipment } from './engine/risk.js';
 import { describeStatus, deadline, sandboxSimLinks } from './engine/status.js';
 import { validateClaims, allowedEvidenceTypes } from './engine/evidence.js';
-import { analyseDispute, submitDecision, aiAdvice, approveProposal, pendingToken, heldWrites, SubmitError } from './disputeService.js';
+import { analyseDispute, submitDecision, aiAdvice, approveProposal, heldWrites, publicProposal, consoleApprovalChannel, SubmitError } from './disputeService.js';
+import { loadCachedDemoRun } from './ai/cachedDemo.js';
 import { TOOLKIT_NAME, TOOLKIT_VERSION, READ_TOOLS, WRITE_TOOLS } from './ai/agent.js';
 import { LABELS } from './engine/labels.js';
 import { PayPalError } from './paypal/client.js';
@@ -16,7 +17,7 @@ import { redact, log } from './lib/redact.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, '..', 'public');
 
-export function createApp({ api, store, engine, config, llm = null, agentTools = null }) {
+export function createApp({ api, store, engine, config, llm = null, agentTools = null, approvalChannel = consoleApprovalChannel }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
@@ -31,7 +32,7 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
 
   const needApi = (_req, res, next) => api ? next() : res.status(503).json({ error: 'NO_CREDENTIALS', message: 'Set PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET (sandbox app) and restart.' });
   // Reviewer passcode (PROOFPILOT_WRITE_PASSCODE). Required for everything that writes to PayPal, spends AI quota, or
-  // returns PayPal / agent data (dispute details, agent runs and approval codes, orders, webhooks). With no passcode
+  // returns PayPal / agent data (dispute details, agent runs, the cached demo run, orders, webhooks; approval codes never go over HTTP). With no passcode
   // configured, those routes answer only to requests from this machine (loopback), so a public host must set one.
   const isLoopback = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress);
   const passOk = (req) => { const got = Buffer.from(String(req.get('x-proofpilot-passcode') || '')); const want = Buffer.from(String(config.writePasscode));
@@ -136,12 +137,17 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
 
   // AI advice (Gemini or Groq). Every drafted sentence has already passed the strict citation checker.
   app.post('/api/disputes/:id/ai', needApi, guard, wrap(async (req, res) => {
-    res.json(await aiAdvice({ api, store, engine, llm, agentTools }, req.params.id, { refresh: Boolean(req.body?.refresh) }));
+    res.json(await aiAdvice({ api, store, engine, llm, agentTools, approvalChannel }, req.params.id, { refresh: Boolean(req.body?.refresh) }));
   }));
-  // Agent runs (passcode-guarded). The approval code of a pending proposal is added here from server memory; the store
-  // only keeps its digest.
+  // Agent runs (passcode-guarded). No approval code and no code digest is ever returned here or anywhere in the API: the
+  // code goes only to the human-only approval channel (server console by default). liveCode says whether a pending
+  // proposal still has an unused code, so the UI knows to show the input box.
   app.get('/api/disputes/:id/agent', guard, (req, res) => res.json({ runs: (store.data.agentRuns?.[req.params.id] || []).map(r => ({ ...r,
-    proposals: (r.proposals || []).map(p => { const { tokenDigest: _d, ...rest } = p; const token = p.status === 'PENDING_SELLER_APPROVAL' ? pendingToken(p.id) : null; return token ? { ...rest, approvalCode: token } : rest; }) })) }));
+    proposals: (r.proposals || []).map(p => ({ ...publicProposal(p), liveCode: p.status === 'PENDING_SELLER_APPROVAL' && heldWrites.has(p.id) })) })),
+    writes: (store.data.disputeWrites?.[req.params.id] || []).map(w => ({ at: w.at, source: w.source, kind: w.kind, amount: w.amount, dryRun: Boolean(w.dryRun), failed: Boolean(w.failed) })) }));
+  // A committed, recorded agent run for demos when the live model is rate-limited or not configured. Always labelled
+  // CACHED_DEMO; its proposals are not approvable and nothing in it is re-run.
+  app.get('/api/demo/cached-agent-run', guard, (_req, res) => { const d = loadCachedDemoRun(); return d ? res.json(d) : res.status(404).json({ error: 'NO_CACHED_RUN' }); });
   app.post('/api/agent/proposals/:pid/approve', needApi, guard, wrap(async (req, res) => {
     res.json(await approveProposal({ api, store, engine, config }, req.params.pid, req.body || {}));
   }));
@@ -149,7 +155,7 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
     const p = Object.values(store.data.agentRuns || {}).flat().flatMap(r => r.proposals || []).find(x => x.id === req.params.pid);
     if (!p) return res.status(404).json({ error: 'UNKNOWN_PROPOSAL' });
     if (p.status === 'PENDING_SELLER_APPROVAL') { p.status = 'DISMISSED'; heldWrites.delete(p.id); }
-    store.save?.(); const { tokenDigest: _d, ...rest } = p; res.json({ proposal: rest });
+    store.save?.(); res.json({ proposal: publicProposal(p) });
   }));
 
   app.post('/api/disputes/:id/submit', needApi, guard, wrap(async (req, res) => {

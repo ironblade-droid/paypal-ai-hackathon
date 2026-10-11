@@ -3,7 +3,7 @@ import { adviseWithLlm } from './ai/advisor.js';
 import { runAgent } from './ai/agent.js';
 import { allowedEvidenceTypes, gatherRecords, buildPack, validateClaims, packHash, toEvidencePayload, packPdf, meetsRequirement } from './engine/evidence.js';
 import { bindProposal, proposalHash, issueToken, tokenDigest, TEMPLATES } from './ai/proposals.js';
-import { checkAmountWithin } from './lib/money.js';
+import { checkAmountWithin, parseAmount } from './lib/money.js';
 import { refusalsFor, derivedRefusalRisks } from './lib/refusals.js';
 import { describeStatus, deadline, sellerActions, sandboxSimLinks } from './engine/status.js';
 
@@ -17,7 +17,7 @@ export async function analyseDispute({ api, store, engine }, id) {
   for (const t of allowedTypes) {
     const p = buildPack(t, { dispute, ...recs, localOrder });
     p.validation = validateClaims(p.claims, recs.registry);
-    p.hash = packHash(dispute.dispute_id, t, p.validation.accepted);
+    p.hash = packHash(dispute.dispute_id, t, defaultSelection(p.validation.accepted));
     packs[t] = p;
   }
   // Supporting-info pack (no evidence type) for disputes under review that only accept extra information.
@@ -25,7 +25,7 @@ export async function analyseDispute({ api, store, engine }, id) {
   if (sellerActions(dispute).includes('provide_supporting_info')) {
     const p = buildPack('SUPPORTING_INFO', { dispute, ...recs, localOrder });
     p.validation = validateClaims(p.claims, recs.registry);
-    p.hash = packHash(dispute.dispute_id, 'SUPPORTING_INFO', p.validation.accepted);
+    p.hash = packHash(dispute.dispute_id, 'SUPPORTING_INFO', defaultSelection(p.validation.accepted));
     supporting = p;
   }
   const paypalRejected = refusalsFor(dispute, store);
@@ -43,6 +43,9 @@ export async function analyseDispute({ api, store, engine }, id) {
     _ctx: { dispute, recs },
   };
 }
+
+// What is ticked by default: every checked statement except buyer-entered quotes (those are opt-in only).
+export const defaultSelection = (accepted) => accepted.filter(c => !c.untrusted);
 
 export class SubmitError extends Error { constructor(code, message, extra = {}) { super(message); this.code = code; this.extra = extra; } }
 
@@ -64,7 +67,8 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
       throw new SubmitError('TYPE_REFUSED_BY_PAYPAL', `PayPal already refused ${type} on this dispute at this stage (EVIDENCE_TYPE_IS_NOT_ALLOWED). ProofPilot does not send it again.`, { refusals: a.paypalRejected });
     const pack = action === 'provide_evidence' ? a.packs[type] : a.supporting;
     // Seller may drop claims or add their own; custom claims must cite a fetched record or they are refused.
-    const base = pack.validation.accepted.filter(c => !body.excludeClaimIds?.includes(c.id));
+    // Buyer-entered quotes are never included unless the seller ticked them explicitly (includeClaimIds).
+    const base = pack.validation.accepted.filter(c => c.untrusted ? (Array.isArray(body.includeClaimIds) && body.includeClaimIds.includes(c.id)) : !body.excludeClaimIds?.includes(c.id));
     const claims = [...base, ...(body.customClaims || []).map((c, i) => ({ id: c.id || `custom-${i + 1}`, text: c.text, refs: c.refs, ...(c.source === 'seller' ? { source: 'seller' } : {}) }))];
     const v = validateClaims(claims, a._ctx.recs.registry);
     if (!v.ok) throw new SubmitError('UNCITED_CLAIMS', 'The checker refused claims: each needs a linked PayPal record, and amounts, dates and ids must be in it.', { rejected: v.rejected });
@@ -94,8 +98,29 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
     call = () => api.makeOffer(id, payloadPreview);
   } else throw new SubmitError('UNSUPPORTED_ACTION', `ProofPilot does not submit ${action}.`);
 
+  // Money-moving manual actions share the per-dispute ledger with agent proposals (pending agent proposals do not block
+  // the seller's own action, but they cannot run after it).
+  const manualKind = action === 'accept_claim' ? 'accept' : action === 'make_offer' ? 'offer' : null;
+  if (manualKind && !config.dryRun) {
+    const reasons = writeBlockers(store, id, { kind: manualKind, disputedValue: a.amount?.value, registry: a._ctx.recs.registry, countPending: false })
+      .filter(r => r !== 'DISPUTE_ALREADY_HAS_A_WRITE' || writeLedger(store, id).some(w => !w.dryRun && !w.failed && w.kind !== 'offer')); // an earlier offer does not stop the seller accepting
+    if (reasons.length) throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'ProofPilot already sent a refund or accept on this dispute (or one is running), or this would exceed the disputed amount.', { reasons });
+  }
   const approval = store.addApproval({ at: new Date().toISOString(), disputeId: id, action, evidenceType: body.evidenceType, packHash: body.packHash, dryRun: config.dryRun });
   if (config.dryRun) return { dryRun: true, before, after: before, payloadPreview, approval };
+  if (manualKind) { if (writesInFlight.has(id)) throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'Another write on this dispute is running.', { reasons: ['WRITE_IN_PROGRESS'] });
+    writesInFlight.add(id); recordWrite(store, id, { source: 'seller-manual', action, kind: manualKind, amount: manualKind === 'accept' ? a.amount : payloadPreview.amount }); }
+  try { return await sendDecision({ api, store, config }, { id, a, action, body, before, call, payloadPreview, approval }); }
+  catch (e) {
+    // PayPal refused it (4xx with an issue code): nothing happened, so the ledger entry does not count. Anything else
+    // (timeout, 5xx) stays counted: fail closed.
+    const last = manualKind ? writeLedger(store, id).at(-1) : null;
+    if (last && e?.issue && e.status >= 400 && e.status < 500) { last.failed = true; last.failure = e.issue; store.save?.(); }
+    throw e;
+  }
+  finally { if (manualKind) writesInFlight.delete(id); }
+}
+async function sendDecision({ api, store }, { id, a, action, body, before, call, payloadPreview, approval }) {
   let response;
   try { response = await call(); }
   catch (e) {
@@ -113,12 +138,74 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
   return { dryRun: false, before, after, payloadPreview, response: { links: (response?.links || []).map(l => l.rel) }, approval };
 }
 
+// ---------- One write per dispute (review v0.4, finding 2)
+// A dispute may have at most ONE live (pending, approvable) or executed money/state-changing agent write. ProofPilot's
+// own executed writes are kept in a per-dispute ledger (store.data.disputeWrites), and refunds already returned to the
+// buyer are counted against the disputed amount, so the total can never exceed it. Checked when a proposal is recorded,
+// again synchronously at approval (before any await, with an in-flight lock per dispute), and on the manual
+// accept / offer path.
+const writesInFlight = new Set();
+const cents = (v) => parseAmount(String(v ?? ''))?.cents ?? null;
+export function writeLedger(store, disputeId) { store.data.disputeWrites ||= {}; return (store.data.disputeWrites[disputeId] ||= []); }
+function recordWrite(store, disputeId, entry) { writeLedger(store, disputeId).push({ at: new Date().toISOString(), ...entry }); store.save?.(); }
+const proposalsFor = (store, disputeId) => (store.data.agentRuns?.[disputeId] || []).flatMap(r => r.proposals || []);
+function isLive(p) {
+  if (p.status !== 'PENDING_SELLER_APPROVAL' || !p.executable || !heldWrites.has(p.id)) return false;
+  return !(p.tokenExpiresAt && Date.parse(p.tokenExpiresAt) < Date.now());
+}
+// Money already returned to the buyer on this dispute: the larger of ProofPilot's executed refunds/accepts and the
+// completed seller refunds PayPal reports on the order (one refund can appear in both, so they are not added up).
+export function refundedSoFar(store, disputeId, registry = null) {
+  const ledger = writeLedger(store, disputeId).filter(w => !w.dryRun && !w.failed && (w.kind === 'refund' || w.kind === 'accept')).reduce((n, w) => n + (cents(w.amount?.value) || 0), 0);
+  const paypal = (registry?.all?.() || []).filter(r => r.type === 'refund' && r.data?.proofpilot_classification === 'SELLER_REFUND').reduce((n, r) => n + (cents(r.data.amount?.value) || 0), 0);
+  return Math.max(ledger, paypal);
+}
+const KIND = { create_refund: 'refund', accept_dispute_claim: 'accept', propose_make_offer: 'offer' };
+function moneyOut(kind, amountValue, disputedValue) { return kind === 'refund' ? (cents(amountValue) ?? Infinity) : kind === 'accept' ? (cents(disputedValue) ?? Infinity) : 0; }
+// Reasons a new write on this dispute must not go ahead. exceptId: the proposal being approved itself.
+export function writeBlockers(store, disputeId, { kind, amountValue, disputedValue, registry = null, exceptId = null, countPending = true }) {
+  const reasons = [];
+  const executed = writeLedger(store, disputeId).filter(w => !w.dryRun && !w.failed);
+  if (executed.length) reasons.push('DISPUTE_ALREADY_HAS_A_WRITE');
+  if (countPending && proposalsFor(store, disputeId).some(p => p.id !== exceptId && isLive(p))) reasons.push('ANOTHER_PROPOSAL_PENDING');
+  if (writesInFlight.has(disputeId)) reasons.push('WRITE_IN_PROGRESS');
+  const max = cents(disputedValue);
+  if (kind === 'refund' || kind === 'accept') {
+    if (max == null || refundedSoFar(store, disputeId, registry) + moneyOut(kind, amountValue, disputedValue) > max) reasons.push('REFUNDS_WOULD_EXCEED_DISPUTED');
+  }
+  return reasons;
+}
+
+// ---------- Approval-code delivery (review v0.4, finding 3)
+// The code is never put in any HTTP response. It goes to a human-only channel: by default the server console (the
+// terminal running `npm start`, or the host's private log stream). A script holding only the reviewer passcode can list
+// and approve proposals over the API, but it cannot read the code.
+export function consoleApprovalChannel({ proposalId, disputeId, description, code, expiresAt }) {
+  process.stdout.write(`\n[ProofPilot] Approval code for proposal ${proposalId} on dispute ${disputeId}\n  ${description}\n  Code: ${code}  (single use, expires ${expiresAt}; type it on the dispute page to approve; never sent over the API)\n\n`);
+}
+// What clients may see of a proposal: never the code, never its digest.
+export function publicProposal(p) { const { tokenDigest: _d, ...rest } = p; return rest; }
+
 // AI advice for one dispute (on demand; cached per dispute update_time so the free tier is not wasted).
 // With Gemini and PayPal credentials, this runs the PayPal Agent Toolkit agent (read tools autonomous, writes proposed
 // only). Otherwise the plain JSON advisor. Both share the same checker and fallback (finishAdvice).
+// Every answer is labelled: run.kind LIVE_MODEL (the model answered now) or RULES_FALLBACK (no key, model error or rate
+// limit; the deterministic rules engine decides). A committed, recorded agent run (CACHED_DEMO) can be shown separately
+// when the live model is unavailable; it is never presented as live and its proposals cannot be approved.
 const aiCache = new Map();
-export const heldWrites = new Map(); // proposal id -> { tool, args, execute } (server memory only, never sent to clients)
-export async function aiAdvice({ api, store, engine, llm, agentTools }, id, { refresh = false } = {}) {
+export const heldWrites = new Map(); // proposal id -> { tool, execute, badAttempts } (server memory only; no code kept)
+const RATE_LIMIT = /\b429\b|RESOURCE_EXHAUSTED|quota|rate.?limit|too many requests/i;
+function labelRun(out, llm) {
+  const live = out.available !== false && out.ok && out.recommendation?.source === 'llm';
+  const liveError = out.available === false ? 'NOT_CONFIGURED' : !out.ok ? (RATE_LIMIT.test(String(out.error || '')) ? 'RATE_LIMITED' : 'MODEL_ERROR') : null;
+  out.run = { kind: live ? 'LIVE_MODEL' : 'RULES_FALLBACK', model: llm?.model || null, liveError,
+    note: live ? 'Live answer from the model, checked by ProofPilot.' : liveError === 'RATE_LIMITED' ? 'The live model is rate-limited (Gemini free tier: 20 requests per model per day). The rules engine decides; a recorded demo run can be shown, clearly marked as cached.'
+      : liveError === 'NOT_CONFIGURED' ? 'No AI key on this server. The rules engine decides; a recorded demo run can be shown, clearly marked as cached.'
+      : liveError ? 'The model call failed. The rules engine decides.' : 'The model answered, but its recommendation did not pass the checks, so the rules engine decides.' };
+  if (liveError) out.cachedDemo = { available: true, path: '/api/demo/cached-agent-run' };
+  return out;
+}
+export async function aiAdvice({ api, store, engine, llm, agentTools, approvalChannel = consoleApprovalChannel }, id, { refresh = false } = {}) {
   const a = await analyseDispute({ api, store, engine }, id);
   const useAgent = Boolean(llm?.languageModel && agentTools);
   const key = `${id}|${a.updateTime}|${llm?.model || 'none'}|${useAgent ? 'agent' : 'plain'}`;
@@ -131,14 +218,18 @@ export async function aiAdvice({ api, store, engine, llm, agentTools }, id, { re
     out = await runAgent({ provider: llm, rawTools: typeof agentTools === 'function' ? agentTools() : agentTools, ctx, generateTextImpl: agentTools.generateTextImpl });
     const held = out._held || {}; delete out._held;
     const props = out.agent?.proposals || [];
-    // A pending, executable proposal gets a server-issued single-use approval token bound to its id, hash and dispute.
-    // Only the digest is stored with the proposal; the token itself stays in server memory and is shown to the seller
-    // through the passcode-guarded agent route.
+    // A pending, executable proposal must also be the dispute's only write (finding 2). If so it gets a server-issued,
+    // single-use approval code bound to its id, hash and dispute. Only the digest is stored; the code itself goes to the
+    // human-only approval channel and is not kept anywhere on the server.
     for (const p of props) {
       if (p.status !== 'PENDING_SELLER_APPROVAL' || !p.executable) continue;
+      const blockers = writeBlockers(store, id, { kind: KIND[p.tool], amountValue: p.canonical?.amount?.value, disputedValue: a.amount?.value, registry: a._ctx.recs.registry });
+      if (blockers.length) { p.status = 'BLOCKED'; p.blockedReasons = blockers; continue; }
       const t = issueToken(p);
-      p.tokenDigest = t.digest; p.tokenExpiresAt = t.expiresAt;
-      heldWrites.set(p.id, { tool: p.tool, execute: held[p.tool] || null, token: t.token, badAttempts: 0 });
+      p.tokenDigest = t.digest; p.tokenExpiresAt = t.expiresAt; p.approvalCodeDelivery = 'SERVER_CONSOLE';
+      heldWrites.set(p.id, { tool: p.tool, execute: held[p.tool] || null, badAttempts: 0 });
+      try { approvalChannel({ proposalId: p.id, disputeId: id, description: p.description, code: t.token, expiresAt: t.expiresAt }); }
+      catch { heldWrites.delete(p.id); p.status = 'BLOCKED'; p.blockedReasons = ['APPROVAL_CHANNEL_FAILED']; }
     }
     store.data.agentRuns ||= {};
     (store.data.agentRuns[id] ||= []).unshift({ at: new Date().toISOString(), model: llm.model, reportedModel: out.reportedModel || null, toolkit: out.agent?.toolkit, ok: out.ok,
@@ -146,11 +237,12 @@ export async function aiAdvice({ api, store, engine, llm, agentTools }, id, { re
     store.data.agentRuns[id] = store.data.agentRuns[id].slice(0, 10);
     store.save?.();
   } else out = await adviseWithLlm(llm, ctx);
+  labelRun(out, llm);
   if (out.ok) aiCache.set(key, out);
   if (out.available) store.audit({ type: useAgent ? 'AGENT_RUN' : 'AI_ADVICE', disputeId: id, provider: out.provider, model: out.model, ok: out.ok,
     action: out.recommendation?.action, tools: (out.agent?.activity || []).map(x => `${x.kind}:${x.tool}`),
     refused: (out.narrative?.refused?.length || 0) + (out.rationale?.refused?.length || 0) });
-  return out;
+  return out.agent ? { ...out, agent: { ...out.agent, proposals: (out.agent.proposals || []).map(publicProposal) } } : out;
 }
 
 // Seller approval gate for agent proposals. To run, a proposal must:
@@ -159,12 +251,11 @@ export async function aiAdvice({ api, store, engine, llm, agentTools }, id, { re
 //      five wrong tokens also void it);
 //   3. bind again against a FRESH PayPal read of the dispute, giving the identical canonical hash.
 // Only then does the held toolkit tool (or the offer call) run, with ProofPilot's canonical arguments and template notes.
-export function pendingToken(proposalId) { return heldWrites.get(proposalId)?.token || null; }
 export async function approveProposal({ api, store, engine, config }, proposalId, body) {
   const all = Object.values(store.data.agentRuns || {}).flat().flatMap(r => r.proposals || []);
   const p = all.find(x => x.id === proposalId);
   if (!p) throw new SubmitError('UNKNOWN_PROPOSAL', 'No such agent proposal.');
-  if (body?.approved !== true) throw new SubmitError('NOT_APPROVED', 'Seller approval is required: send approved=true and the approval code shown on the proposal.');
+  if (body?.approved !== true) throw new SubmitError('NOT_APPROVED', 'Seller approval is required: send approved=true and the approval code printed in the ProofPilot server console.');
   if (p.status !== 'PENDING_SELLER_APPROVAL') throw new SubmitError('NOT_PENDING', 'This proposal is not waiting for approval.', { status: p.status });
   if (!p.executable) throw new SubmitError('USE_EVIDENCE_APPROVAL', 'Evidence proposals are approved in the evidence pack panel (hash-bound).');
   const h = heldWrites.get(p.id);
@@ -177,6 +268,18 @@ export async function approveProposal({ api, store, engine, config }, proposalId
     throw new SubmitError('BAD_TOKEN', 'The approval code does not match this proposal.');
   }
   heldWrites.delete(p.id); // single use: consumed now, whatever happens next
+  // One write per dispute, checked synchronously before any await; the dispute is then locked until this approval ends.
+  const kind = KIND[p.tool];
+  const pre = writeBlockers(store, p.disputeId, { kind, amountValue: p.canonical?.amount?.value, disputedValue: p.bound?.disputedAmount?.value, exceptId: p.id });
+  if (pre.length) {
+    p.status = 'BLOCKED_AT_APPROVAL'; p.blockedReasons = pre; store.save?.();
+    store.audit({ type: 'AGENT_PROPOSAL_BLOCKED_AT_APPROVAL', proposalId: p.id, reasons: pre });
+    throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'This dispute already has a write from ProofPilot (or one is running), or the refund would exceed the disputed amount. Nothing was sent.', { reasons: pre });
+  }
+  writesInFlight.add(p.disputeId);
+  try { return await runApproved({ api, store, engine, config }, p, h, kind); } finally { writesInFlight.delete(p.disputeId); }
+}
+async function runApproved({ api, store, engine, config }, p, h, kind) {
   const a = await analyseDispute({ api, store, engine }, p.disputeId);
   const fresh = bindProposal(p.tool, p.canonical, { dispute: a._ctx.dispute, actions: a.status.actions, allowedTypes: a.allowedTypes,
     rejectedTypes: [...new Set(a.paypalRejected.map(r => r.type))], registry: a._ctx.recs.registry, final: { action: p.finalAction } });
@@ -186,13 +289,20 @@ export async function approveProposal({ api, store, engine, config }, proposalId
     store.audit({ type: 'AGENT_PROPOSAL_BLOCKED_AT_APPROVAL', proposalId: p.id, reasons: p.blockedReasons });
     throw new SubmitError('STALE_PROPOSAL', 'PayPal data changed since the proposal, or it no longer passes the checks. Nothing was sent.', { reasons: p.blockedReasons });
   }
+  // Refund total against the disputed amount, now also counting refunds PayPal reports on the fresh read.
+  if ((kind === 'refund' || kind === 'accept') && refundedSoFar(store, p.disputeId, a._ctx.recs.registry) + moneyOut(kind, p.canonical?.amount?.value, a.amount?.value) > (cents(a.amount?.value) ?? 0)) {
+    p.status = 'BLOCKED_AT_APPROVAL'; p.blockedReasons = ['REFUNDS_WOULD_EXCEED_DISPUTED']; store.save?.();
+    throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'Refunds on this dispute would exceed the disputed amount. Nothing was sent.', { reasons: p.blockedReasons });
+  }
   store.audit({ type: 'AGENT_PROPOSAL_APPROVED', proposalId: p.id, tool: p.tool, hash: p.hash, dryRun: Boolean(config.dryRun) });
-  if (config.dryRun) { p.status = 'APPROVED_DRY_RUN'; store.save?.(); return { dryRun: true, proposal: p, sent: p.canonical }; }
+  if (config.dryRun) { p.status = 'APPROVED_DRY_RUN'; store.save?.(); return { dryRun: true, proposal: publicProposal(p), sent: p.canonical }; }
+  // Recorded before the call: if PayPal times out after acting, the dispute still counts as written (fail closed).
+  recordWrite(store, p.disputeId, { source: 'agent-proposal', proposalId: p.id, tool: p.tool, kind, amount: kind === 'accept' ? a.amount : p.canonical?.amount || null });
   let result;
   if (p.tool === 'propose_make_offer') result = await api.makeOffer(p.disputeId, { note: p.canonical.note, amount: p.canonical.amount });
   else if (h.execute) result = await h.execute(p.canonical, {});
   else throw new SubmitError('PROPOSAL_EXPIRED', 'The toolkit tool for this proposal is not loaded.');
   p.status = 'EXECUTED_AFTER_APPROVAL'; p.executedAt = new Date().toISOString(); store.save?.();
   store.audit({ type: 'AGENT_PROPOSAL_EXECUTED', proposalId: p.id, tool: p.tool });
-  return { dryRun: false, proposal: p, sent: p.canonical, result: JSON.parse(JSON.stringify(result ?? null)) };
+  return { dryRun: false, proposal: publicProposal(p), sent: p.canonical, result: JSON.parse(JSON.stringify(result ?? null)) };
 }

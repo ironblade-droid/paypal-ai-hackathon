@@ -17,9 +17,12 @@ function scripted(steps) { let i = 0; return new MockLanguageModelV2({ doGenerat
   return { usage, warnings: [], finishReason: 'stop', content: [{ type: 'text', text: s.text }] }; } }); }
 function toolkit(calls) { const t = (n) => ({ description: n, parameters: z.object({}).passthrough(), execute: async (a) => { calls.push({ n, a }); return { status: 'OK' }; } });
   return { get_dispute: t('get_dispute'), create_refund: t('create_refund'), accept_dispute_claim: t('accept_dispute_claim'), create_shipment_tracking: t('create_shipment_tracking'), pay_order: t('pay_order'), create_invoice: t('create_invoice') }; }
-async function server({ steps, api = fakeApi(), config = { dryRun: false, writePasscode: 'pc' } }) {
+// Approval codes arrive only on the human-only channel (server console in production); tests capture that channel here.
+const CODES = new Map();
+async function server({ steps, api = fakeApi(), config = { dryRun: false, writePasscode: 'pc' }, store = createStore(null) }) {
   const calls = []; const raw = toolkit(calls);
-  const app = createApp({ api, store: createStore(null), engine: rulesEngine, config, llm: { provider: 'gemini', model: 'mock', label: 'mock', languageModel: async () => scripted(steps) }, agentTools: () => raw });
+  const app = createApp({ api, store, engine: rulesEngine, config, llm: { provider: 'gemini', model: 'mock', label: 'mock', languageModel: async () => scripted(steps) }, agentTools: () => raw,
+    approvalChannel: (x) => CODES.set(x.proposalId, x.code) });
   const s = await new Promise(r => { const x = app.listen(0, () => r(x)); }); const base = `http://127.0.0.1:${s.address().port}`;
   const req = async (m, p, b, pc) => { const r = await fetch(base + p, { method: m, headers: { 'Content-Type': 'application/json', ...(pc ? { 'x-proofpilot-passcode': pc } : {}) }, body: b ? JSON.stringify(b) : undefined }); return { status: r.status, body: await r.json() }; };
   return { s, req, calls };
@@ -62,7 +65,7 @@ test('refund proposal is bound: own capture, template note, at most the disputed
     assert.equal(p.status, 'PENDING_SELLER_APPROVAL');
     assert.deepEqual(p.canonical, { capture_id: 'CAP123', amount: { currency_code: 'USD', value: '2.00' }, note_to_payer: TEMPLATES.refundNote('PP-D-1') });
     assert.equal(q.status, 'BLOCKED'); assert.deepEqual(q.blockedReasons, ['ONE_PROPOSAL_PER_RUN']);
-    const r = await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: p.approvalCode }, 'pc');
+    const r = await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: CODES.get(p.id) }, 'pc');
     assert.equal(r.body.dryRun, false, JSON.stringify(r.body));
     assert.deepEqual(calls, [{ n: 'create_refund', a: p.canonical }]);
   } finally { s.close(); }
@@ -77,9 +80,9 @@ test('approval re-checks fresh PayPal data: a changed dispute blocks the run and
     const p = (await req('GET', '/api/disputes/PP-D-1/agent', null, 'pc')).body.runs[0].proposals[0];
     assert.equal(p.status, 'PENDING_SELLER_APPROVAL');
     changed = true; // PayPal no longer offers accept_claim
-    const r = await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: p.approvalCode }, 'pc');
+    const r = await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: CODES.get(p.id) }, 'pc');
     assert.equal(r.body.error, 'STALE_PROPOSAL'); assert.ok(r.body.reasons.includes('ACTION_NOT_OFFERED'));
-    assert.equal((await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: p.approvalCode }, 'pc')).body.error, 'NOT_PENDING');
+    assert.equal((await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: CODES.get(p.id) }, 'pc')).body.error, 'NOT_PENDING');
     assert.deepEqual(calls, []);
   } finally { s.close(); }
   // Amount change also invalidates (hash includes the disputed amount).
@@ -90,7 +93,7 @@ test('approval re-checks fresh PayPal data: a changed dispute blocks the run and
     await b.req('POST', '/api/disputes/PP-D-1/ai', {}, 'pc');
     const p = (await b.req('GET', '/api/disputes/PP-D-1/agent', null, 'pc')).body.runs[0].proposals[0];
     ch2 = true;
-    const r = await b.req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: p.approvalCode }, 'pc');
+    const r = await b.req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: CODES.get(p.id) }, 'pc');
     assert.equal(r.body.error, 'STALE_PROPOSAL'); assert.deepEqual(r.body.reasons, ['PAYPAL_DATA_CHANGED']); assert.deepEqual(b.calls, []);
   } finally { b.s.close(); }
 });
@@ -101,7 +104,7 @@ test('five wrong approval codes void the proposal', async () => {
     await req('POST', '/api/disputes/PP-D-1/ai', {}, 'pc');
     const p = (await req('GET', '/api/disputes/PP-D-1/agent', null, 'pc')).body.runs[0].proposals[0];
     for (let i = 0; i < 5; i++) assert.equal((await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: `APPROVE-WRONG-${i}` }, 'pc')).body.error, 'BAD_TOKEN');
-    assert.equal((await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: p.approvalCode }, 'pc')).body.error, 'NOT_PENDING');
+    assert.equal((await req('POST', `/api/agent/proposals/${p.id}/approve`, { approved: true, token: CODES.get(p.id) }, 'pc')).body.error, 'NOT_PENDING');
     assert.deepEqual(calls, []);
   } finally { s.close(); }
 });

@@ -24,17 +24,32 @@ const refChip = (r) => { const rec = A?.records.find(x => x.type === r.type && x
   return `<span class="chip" title="${PP.esc(rec?.note || rec?.source || '')}">${PP.esc(r.type)} ${PP.esc(r.id)}</span>${r.type === 'tracker' ? '<span class="testdata">sandbox test data</span>' : ''}`; };
 const currentPack = () => type === 'SUPPORTING_INFO' ? A.supporting : A.packs[type];
 
+// Every AI answer carries one of three labels: LIVE (the model answered now), RULES ENGINE FALLBACK, or CACHED DEMO
+// (a committed run recorded earlier, shown only on request when the live model is unavailable).
+const RUN_BADGE = { LIVE_MODEL: ['LIVE MODEL', 'review'], RULES_FALLBACK: ['RULES ENGINE FALLBACK', 'wait'], CACHED_DEMO: ['CACHED DEMO RUN (not live)', 'closed'] };
+const runBadge = (k) => PP.badge(...(RUN_BADGE[k] || RUN_BADGE.RULES_FALLBACK));
+let DEMO = null;
+function demoButton() { return '<button class="sec" id="showDemo">Show the cached demo run (recorded earlier, not live)</button>'; }
+function demoHtml() {
+  if (!DEMO) return '';
+  const r = DEMO.run;
+  return `<div class="banner wait" id="cachedDemo">${runBadge('CACHED_DEMO')} <b>${PP.esc(DEMO.label)}</b><br>
+    Recorded ${PP.esc(DEMO.recorded_at_ist)} on sandbox dispute ${PP.esc(DEMO.recorded_on_dispute)} · model reported by the API: ${PP.esc(DEMO.reported_model)} · ${PP.esc(DEMO.toolkit)}.<br><small>${PP.esc(DEMO.why)}</small>
+    <div>Recommendation then: <b>${PP.esc(PP.h('rec', r.recommendation?.action))}</b>. Tool calls: ${r.activity.map(a => PP.esc(PP.h('tool', a.tool)) + ' (' + (a.kind === 'read' ? 'read' : 'write, proposed only') + ')').join(', ')}.</div>
+    ${r.proposals.map(p => `<div class="claim">${PP.esc(p.description || '')} · <b>cached demo, not approvable</b></div>`).join('')}</div>`;
+}
+function wireDemo() { if (window.showDemo) showDemo.onclick = async () => { try { DEMO = await PP.api('/api/demo/cached-agent-run'); } catch (e) { DEMO = null; alert(e.message); } renderAi(); }; }
 function renderAi() {
   const c = PP.cfg?.ai;
-  if (!c?.configured) { aiCard.innerHTML = `<h2>AI advisor</h2><p class="muted">Not configured on this server: set <code>GEMINI_API_KEY</code> (Google Gemini) or <code>GROQ_API_KEY</code> (Groq) and restart. Until then the rules engine below makes the recommendation. No AI output is shown or simulated.</p>`; return; }
+  if (!c?.configured) { aiCard.innerHTML = `<h2>AI advisor ${runBadge('RULES_FALLBACK')}</h2><p class="muted">Not configured on this server: set <code>GEMINI_API_KEY</code> (Google Gemini) or <code>GROQ_API_KEY</code> (Groq) and restart. Until then the rules engine below makes the recommendation. No AI output is simulated; you can look at a recorded agent run, clearly marked as cached.</p>${DEMO ? demoHtml() : demoButton()}`; wireDemo(); return; }
   let body = `<h2>AI advisor <small>${PP.esc(c.label)}${c.agent ? ' · agent on ' + PP.esc(c.agent.toolkit) : ''}</small></h2><p class="muted">The model recommends an action and picks supporting facts by id. It does not write the evidence text: each fact is a sentence ProofPilot renders from fields of the PayPal records below. Any free text the model returns is refused unless it is exactly one of those facts. The checker confirms a fact is in the cited record; it cannot tell whether the fact helps your case. You tick and approve each sentence before anything is sent.</p>`;
   if (!AI) body += `<button id="askAi">Ask ${PP.esc(c.label)}</button>`;
-  else if (!AI.ok) body += `<div class="banner err">The model call failed (${PP.esc(AI.error)}). Using the rules engine recommendation.</div><button class="sec" id="askAi">Try again</button>`;
+  else if (!AI.ok) body += `<div class="banner err">${runBadge('RULES_FALLBACK')} ${AI.run?.liveError === 'RATE_LIMITED' ? 'The live model is rate-limited (Gemini free tier: 20 requests per model per day).' : 'The model call failed (' + PP.esc(AI.error) + ').'} Using the rules engine recommendation.</div><button class="sec" id="askAi">Try again</button> ${AI.cachedDemo?.available ? (DEMO ? '' : demoButton()) : ''}${demoHtml()}`;
   else {
     const r = AI.recommendation;
     const refusedAll = [...AI.rationale.refused, ...AI.narrative.refused];
     const why = [...new Set(refusedAll.map(x => PP.h('refusal', x.reason)))];
-    body += `<h2>${PP.esc(PP.h('rec', r.action))}${r.evidenceType ? `: ${PP.esc(PP.h('evidence', r.evidenceType))}` : ''} <small>(${r.source === 'llm' ? 'model' : 'rules fallback'}; ${AI.agreesWithRules ? 'agrees with' : 'differs from'} the rules engine, which says "${PP.esc(PP.h('rec', AI.rules.action))}")</small></h2>
+    body += `<div>${runBadge(AI.run?.kind)} <small>${PP.esc(AI.run?.note || '')}</small></div><h2>${PP.esc(PP.h('rec', r.action))}${r.evidenceType ? `: ${PP.esc(PP.h('evidence', r.evidenceType))}` : ''} <small>(${r.source === 'llm' ? 'model' : 'rules fallback'}; ${AI.agreesWithRules ? 'agrees with' : 'differs from'} the rules engine, which says "${PP.esc(PP.h('rec', AI.rules.action))}")</small></h2>
       ${AI.flags.map(f => `<div class="gap">${PP.esc(f)}</div>`).join('')}
       <b>Facts behind the recommendation</b>${AI.rationale.accepted.map(c => `<div class="claim">${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('') || '<div class="muted">No reason the model gave passed the checker.</div>'}
       <b>Facts the model suggests sending</b> <small>(rendered from PayPal record fields; tick to add to the pack)</small>
@@ -46,7 +61,7 @@ function renderAi() {
       <small>${PP.esc(AI.provider)} · ${PP.esc(AI.model)} · ${AI.ms ?? '?'} ms · ${new Date(AI.generatedAt).toLocaleTimeString()}${AI.cached ? ' (cached for this dispute version)' : ''}</small>
       <p><button class="sec" id="askAi">Regenerate</button></p>`;
   }
-  aiCard.innerHTML = body;
+  aiCard.innerHTML = body; wireDemo();
   if (window.askAi) askAi.onclick = async () => { askAi.disabled = true; askAi.textContent = 'Asking the model…';
     try { AI = await PP.api(`/api/disputes/${encodeURIComponent(id)}/ai`, { method: 'POST', body: { refresh: Boolean(AI) } }); } catch (e) { AI = { ok: false, error: e.message }; }
     renderAi(); renderApprove(); loadAgent(); };
@@ -77,7 +92,9 @@ function render() {
   const p = type ? currentPack() : null;
   pack.innerHTML = `<h2>Evidence pack</h2>` + (!p ? '<div class="muted">No evidence can be sent right now: PayPal is not requesting evidence and offers no supporting-info action.</div>' :
     `<label>Pack type: only evidence PayPal requests on this dispute, plus supporting info when PayPal offers it</label><select id="typeSel">${types.map(t => `<option value="${t}" ${t === type ? 'selected' : ''}>${PP.esc(PP.h('evidence', t))}${(A.paypalRejected || []).some(r => r.type === t) ? ' - refused by PayPal' : ''}</option>`).join('')}</select>
-     <div style="margin-top:8px">${p.validation.accepted.map(c => `<div class="claim"><input type="checkbox" class="cl" value="${PP.esc(c.id)}" checked> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('')}
+     <div style="margin-top:8px">${p.validation.accepted.map(c => c.untrusted
+        ? `<div class="claim untrusted"><input type="checkbox" class="cl" value="${PP.esc(c.id)}"> <span class="testdata">buyer-entered, not ticked</span> <blockquote>${PP.esc(c.text)}</blockquote><small>Typed by the buyer, not checked by ProofPilot. Only tick it if you want PayPal to see the buyer's own wording, quoted.</small><div>${c.refs.map(refChip).join('')}</div></div>`
+        : `<div class="claim"><input type="checkbox" class="cl" value="${PP.esc(c.id)}" checked> ${PP.esc(c.text)}<div>${c.refs.map(refChip).join('')}</div></div>`).join('')}
      ${p.validation.rejected.map(x => `<div class="claim bad">A built-in sentence was refused by the checker: ${PP.esc(PP.h('refusal', x.reason))}</div>`).join('')}
      ${p.gaps.map(g => `<div class="gap">Gap: ${PP.esc(g.message)}</div>`).join('')}
      ${(A.refusalRisks || []).filter(x => x.type === type).map(x => `<div class="gap">Warning: ${PP.esc(x.message)}</div>`).join('')}
@@ -108,7 +125,8 @@ async function addClaim() {
 function aiPicked() { const ids = [...document.querySelectorAll('.aiPick:checked')].map(x => x.value); return (AI?.narrative?.accepted || []).filter(c => ids.includes(c.id)); }
 function selectedClaims() { const p = currentPack(); const keep = [...document.querySelectorAll('.cl:checked')].map(x => x.value);
   const extra = [...aiPicked(), ...custom];
-  return { exclude: p.validation.accepted.filter(c => !keep.includes(c.id)).map(c => c.id), extra, claims: [...p.validation.accepted.filter(c => keep.includes(c.id)), ...extra] }; }
+  return { exclude: p.validation.accepted.filter(c => !c.untrusted && !keep.includes(c.id)).map(c => c.id),
+    include: p.validation.accepted.filter(c => c.untrusted && keep.includes(c.id)).map(c => c.id), extra, claims: [...p.validation.accepted.filter(c => keep.includes(c.id)), ...extra] }; }
 async function sha16(s) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('').slice(0, 16); }
 
 function renderApprove() {
@@ -134,9 +152,9 @@ function renderApprove() {
       setTimeout(refresh, 4000);
     } catch (e) { out.innerHTML = `<div class="banner err">${PP.esc(e.message)}${e.data?.rejected ? '<pre>' + PP.esc(JSON.stringify(e.data.rejected, null, 2)) + '</pre>' : ''}</div>`; }
   };
-  if (window.subEv) subEv.onclick = async () => { const { exclude, extra, claims } = selectedClaims();
+  if (window.subEv) subEv.onclick = async () => { const { exclude, include, extra, claims } = selectedClaims();
     const canon = JSON.stringify({ disputeId: A.id, evidenceType: type, claims: claims.map(c => ({ id: c.id, text: c.text, refs: c.refs })) });
-    go({ action: evidenceAction, evidenceType: type === 'SUPPORTING_INFO' ? undefined : type, excludeClaimIds: exclude, customClaims: extra, packHash: await sha16(canon), attachPdf: window.attachPdf ? attachPdf.checked : true }); };
+    go({ action: evidenceAction, evidenceType: type === 'SUPPORTING_INFO' ? undefined : type, excludeClaimIds: exclude, includeClaimIds: include, customClaims: extra, packHash: await sha16(canon), attachPdf: window.attachPdf ? attachPdf.checked : true }); };
   if (window.subOffer) subOffer.onclick = () => go({ action: 'make_offer', offerAmount: offerAmt.value.trim() });
   if (window.subAccept) subAccept.onclick = () => go({ action: 'accept_claim' });
   const last = JSON.parse(sessionStorage.getItem('pp-last-submit') || 'null');
@@ -144,8 +162,8 @@ function renderApprove() {
 }
 
 // ---- Agent activity: every PayPal Agent Toolkit call the agent made (reads ran; writes were only proposed).
-let AGENT = null;
-async function loadAgent() { try { const r = await PP.api(`/api/disputes/${encodeURIComponent(id)}/agent`); AGENT = r.runs?.[0] || null; } catch { AGENT = null; } renderAgent(); }
+let AGENT = null; let AGENT_WRITES = [];
+async function loadAgent() { try { const r = await PP.api(`/api/disputes/${encodeURIComponent(id)}/agent`); AGENT = r.runs?.[0] || null; AGENT_WRITES = r.writes || []; } catch { AGENT = null; } renderAgent(); }
 function renderAgent() {
   const info = PP.cfg?.ai?.agent; const run = AGENT;
   if (!info && !run) { agentCard.style.display = 'none'; return; }
@@ -158,13 +176,14 @@ function renderAgent() {
     <table class="simple" id="agentLog"><tr><th>When</th><th>Step</th><th>Kind</th><th>Arguments</th><th>Result (redacted)</th></tr>
     ${run.activity.map(a => `<tr><td>${new Date(a.at).toLocaleTimeString()}</td><td title="PayPal Agent Toolkit tool: ${PP.esc(a.tool)}">${PP.esc(PP.h('tool', a.tool))}</td><td>${kindChip(a.kind)}${a.ok ? '' : ' <span class="sev-BLOCK">error</span>'}</td>
       <td>${a.kind === 'read' ? `<code>${PP.esc(JSON.stringify(a.args))}</code>` : `<small>model's arguments not used${a.args?.fields?.length ? ' (it supplied: ' + PP.esc(a.args.fields.join(', ')) + ')' : ''}</small>`}</td><td><details><summary>${PP.esc(String(a.result).slice(0, 70))}${String(a.result).length > 70 ? '…' : ''}</summary><pre>${PP.esc(a.result)}</pre></details></td></tr>`).join('') || '<tr><td colspan="5" class="muted">The agent made no tool calls.</td></tr>'}</table>`;
-  const statusWords = { PENDING_SELLER_APPROVAL: 'waiting for your approval', BLOCKED: 'blocked by ProofPilot', BLOCKED_AT_APPROVAL: 'blocked when re-checked against PayPal', APPROVED_DRY_RUN: 'approved (dry run, nothing sent)', EXECUTED_AFTER_APPROVAL: 'sent to PayPal after your approval', DISMISSED: 'dismissed', EXPIRED: 'approval code expired', VOIDED: 'voided after wrong codes', RECORDED: 'recorded' };
+  if ((AGENT_WRITES || []).some(w => !w.dryRun && !w.failed)) h += `<div class="banner info">ProofPilot already sent a ${PP.esc(AGENT_WRITES.filter(w => !w.dryRun && !w.failed).map(w => w.kind).join(', '))} on this dispute. Only one write per dispute: new proposals are blocked.</div>`;
+  const statusWords = { PENDING_SELLER_APPROVAL: 'waiting for your approval', BLOCKED: 'blocked by ProofPilot', BLOCKED_AT_APPROVAL: 'blocked when re-checked against PayPal', APPROVED_DRY_RUN: 'approved (dry run, nothing sent)', EXECUTED_AFTER_APPROVAL: 'sent to PayPal after your approval', DISMISSED: 'dismissed', EXPIRED: 'approval code expired', VOIDED: 'voided after wrong codes', RECORDED: 'recorded', CACHED_NOT_APPROVABLE: 'cached demo, not approvable' };
   h += `<h3>Proposed actions (not executed)</h3><p class="muted">ProofPilot rebuilds every proposal from the dispute's own PayPal records: same case, same payment, at most the disputed amount, same currency, and only if it matches the final recommendation. Notes to PayPal and the buyer are ProofPilot templates, never the model's text.</p>` + (run.proposals.length ? run.proposals.map(p => `<div class="claim ${/BLOCKED/.test(p.status) ? 'bad' : ''}">
       <b>${PP.esc(PP.h('tool', p.tool))}</b>: ${PP.esc(p.description || '')} · <b>${PP.esc(statusWords[p.status] || PP.h('x', p.status))}</b>
       ${(p.blockedReasons || []).length ? `<div>Why: ${PP.esc(p.blockedReasons.map(r => PP.h('binding', r)).join('; '))}</div>` : ''}
       ${p.canonical ? `<details><summary>Exactly what would be sent</summary><pre>${PP.esc(JSON.stringify(p.canonical, null, 2))}</pre><small>Proposal hash ${PP.esc(String(p.hash || '').slice(0, 16))}</small></details>` : ''}
-      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && p.approvalCode ? `<div>Approval code for this proposal: <code class="code">${PP.esc(p.approvalCode)}</code> (single use, expires ${new Date(p.tokenExpiresAt).toLocaleTimeString()}). Type it to run this on PayPal: <input size="20" id="pc-${p.id}"> <button class="sec" data-approve="${p.id}">Approve and run</button> <button class="sec" data-dismiss="${p.id}">Dismiss</button></div>` : ''}
-      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && !p.approvalCode ? '<div class="muted">No live approval code (the server restarted or the code was used). Ask the agent again.</div>' : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && p.liveCode ? `<div>To run this on PayPal, type the approval code for proposal <code>${PP.esc(p.id)}</code>. It is printed only in the ProofPilot server console (the terminal running <code>npm start</code>, or your host's private log), never sent to this page or the API. Single use, expires ${new Date(p.tokenExpiresAt).toLocaleTimeString()}.<br><input size="22" id="pc-${p.id}" placeholder="APPROVE-XXXXX-XXXXX" autocomplete="off"> <button class="sec" data-approve="${p.id}">Approve and run</button> <button class="sec" data-dismiss="${p.id}">Dismiss</button></div>` : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && !p.liveCode ? '<div class="muted">No live approval code (the server restarted or the code was used). Ask the agent again.</div>' : ''}
       ${p.status === 'PENDING_SELLER_APPROVAL' && p.kind === 'evidence' && p.canonical?.evidence_type ? `<div><button class="sec" data-usepack="${PP.esc(p.canonical.evidence_type)}">Open in evidence pack</button> (sent only through Approve and submit below)</div>` : ''}
     </div>`).join('') : '<div class="muted">The agent proposed no write action.</div>');
   agentCard.innerHTML = h;

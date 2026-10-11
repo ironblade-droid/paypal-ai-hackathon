@@ -113,7 +113,9 @@ export function buildPack(evidenceType, { dispute, capture, order, trackers, reg
   if (capture) c('payment', `Payment of ${money(capture.amount)} was captured on ${capture.create_time} (capture ${capture.id}).`, [{ type: 'capture', id: capture.id }]);
   if (txn.seller_protection_eligible) c('protection', `PayPal lists this transaction as Seller Protection eligible (${txn.seller_protection_type || 'type not stated'}).`, [{ type: 'dispute', id: dispute.dispute_id }]);
   const addr = order?.purchase_units?.[0]?.shipping?.address;
-  if (addr) c('address', `The PayPal order's shipping address is ${fmtAddr(addr)}.`, [{ type: 'order', id: order.id }]);
+  // The ship-to address is typed by the BUYER at checkout. It is shown only as a quoted, labelled buyer field and is
+  // never pre-ticked: the seller has to opt in to send it (review v0.4, finding 1: evidence injection).
+  if (addr) claims.push({ id: 'address', text: buyerAddressQuote(addr), refs: [{ type: 'order', id: order.id }], untrusted: true, preselected: false });
 
   // Tracking previously sent as evidence but not registered with PayPal is a weak spot: surface it.
   const knownNumbers = new Set(trackers.map(t => t.tracking_number));
@@ -160,7 +162,7 @@ export function meetsRequirement(type, claims, registry) {
   if (type === 'PROOF_OF_FULFILLMENT') return claims.some(c => c.refs.some(usableTracker));
   if (type === 'PROOF_OF_REFUND') return claims.some(c => c.refs.some(r => r.type === 'refund'));  // checker below rejects dispute holds
   if (!SUPPORTED_TYPES.includes(type)) return false;
-  return claims.length > 0;
+  return claims.some(c => !c.untrusted); // a buyer-entered quote alone is not a pack
 }
 
 // ---- The checker.
@@ -207,13 +209,13 @@ export function extractValues(text) {
 }
 // Values a sentence states must appear in the records it cites (case-insensitive).
 export function unsupportedValues(text, refs, registry) {
-  const hay = refs.map(r => { const d = registry.get(r.type, r.id)?.data || {};
+  const hay = refs.map(r => { const d = sellerTrustedView(registry.get(r.type, r.id)?.data || {});
     const extra = r.type === 'tracker' ? { proofpilot_timing: registryTiming(registry, d) } : {};
     return JSON.stringify({ ...d, ...extra }) + ' ' + r.type + ' ' + r.id; }).join(' ').toLowerCase();
   // Money in the cited records as "CUR value" pairs, so "EUR 5.50" does not pass on a USD 5.50 capture.
   const pairs = new Set();
   const walk = (o) => { if (!o || typeof o !== 'object') return; if (typeof o.currency_code === 'string' && typeof o.value === 'string') pairs.add(`${o.currency_code.toUpperCase()} ${o.value}`); for (const x of Object.values(o)) walk(x); };
-  for (const r of refs) walk(registry.get(r.type, r.id)?.data);
+  for (const r of refs) walk(sellerTrustedView(registry.get(r.type, r.id)?.data));
   const bad = extractValues(text).filter(v => v.money
     ? !v.money.currencies.some(c => pairs.has(`${c} ${v.money.value}`))
     : !v.needles.some(n => hay.includes(n.toLowerCase())));
@@ -221,7 +223,32 @@ export function unsupportedValues(text, refs, registry) {
 }
 
 const money = (a) => (a ? `${a.currency_code} ${a.value}` : 'unknown amount');
-const fmtAddr = (a) => (a ? [a.address_line_1, a.admin_area_2, a.admin_area_1, a.postal_code, a.country_code].filter(Boolean).join(', ') : '');
+const fmtAddr = (a) => (a ? [a.address_line_1, a.address_line_2, a.admin_area_2, a.admin_area_1, a.postal_code, a.country_code].filter(Boolean).join(', ') : '');
+// Buyer-written fields (ship-to address lines today; buyer messages and notes never become claims at all). Rendered as
+// a quotation with a fixed label, inner double quotes neutralised, capped in length.
+export const BUYER_QUOTE_LABEL = 'Ship-to address as typed by the buyer on the PayPal order (buyer-entered data, quoted verbatim, not a seller statement)';
+export function buyerAddressQuote(a) {
+  const q = fmtAddr(a).replace(/["\u201c\u201d]/g, "'").replace(/\s+/g, ' ').trim().slice(0, 300);
+  return `${BUYER_QUOTE_LABEL}: "${q}".`;
+}
+// Fields a buyer (or anyone but PayPal and the seller) can write. They are removed before the checker looks for an
+// amount, date or id "in the cited record", so a buyer cannot make a seller sentence pass by planting a value there.
+const BUYER_KEYS = /^(shipping|address|payer|payment_source|messages|notes|note|buyer|name|email_address|content|buyer_response_notes|comments?)$/i;
+export function sellerTrustedView(v, depth = 0) {
+  if (depth > 12 || v == null) return v;
+  if (Array.isArray(v)) return v.map(x => sellerTrustedView(x, depth + 1));
+  if (typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([k]) => !BUYER_KEYS.test(k)).map(([k, x]) => [k, sellerTrustedView(x, depth + 1)]));
+  return v;
+}
+// Is this claim exactly the quoted buyer field of a cited order record?
+function buyerQuoteOf(cl, registry) {
+  for (const r of cl.refs || []) {
+    if (r.type !== 'order') continue;
+    const a = registry.get('order', r.id)?.data?.purchase_units?.[0]?.shipping?.address;
+    if (a && norm(buyerAddressQuote(a)) === norm(cl.text)) return { field: 'order.purchase_units[0].shipping.address' };
+  }
+  return null;
+}
 export const TEST_TRACKING_SUFFIX = '[sandbox test tracking number, no real parcel]';
 export function trackerClaimText(t) {
   return `Shipped with ${t.carrier}${t.carrier_name_other ? ` (${t.carrier_name_other})` : ''}, tracking ${t.tracking_number}, registered with PayPal (status ${t.status}) ${TEST_TRACKING_SUFFIX}.`;
@@ -247,7 +274,8 @@ export function factCatalog(registry) {
     }
     if (r.type === 'order') {
       const pu = d.purchase_units?.[0] || {};
-      if (pu.shipping?.address) f(`${k}:address`, `The PayPal order's shipping address is ${fmtAddr(pu.shipping.address)}.`, ref);
+      // Buyer-entered: kept in the catalog only so the checker can recognise it and refuse it as a model/seller fact.
+      if (pu.shipping?.address) facts.push({ id: `${k}:address`, text: buyerAddressQuote(pu.shipping.address), refs: ref, untrusted: true });
       if (pu.amount) f(`${k}:amount`, `The order total is ${money(pu.amount)}.`, ref);
     }
     if (r.type === 'tracker') {
@@ -277,6 +305,12 @@ export function validateClaims(claims, registry, { strict = false } = {}) {
     if (cl.trailingText) { rejected.push({ claimId: cl.id, reason: 'TEXT_AFTER_CITATION' }); continue; }
     if (hasHiddenChars(cl.text)) { rejected.push({ claimId: cl.id, reason: 'HIDDEN_CHARACTERS' }); continue; }
     if (OUTCOME_WORDS.test(normalizeText(cl.text))) { rejected.push({ claimId: cl.id, reason: 'OUTCOME_CLAIM' }); continue; }
+    // A quoted buyer field: never a fact a model or seller asserts. Strict mode (model output) refuses it outright; the
+    // seller path keeps it only as labelled, untrusted data (opt-in, never pre-ticked).
+    const quote = buyerQuoteOf(cl, registry);
+    if (quote && strict) { rejected.push({ claimId: cl.id, reason: 'BUYER_WRITTEN_FIELD' }); continue; }
+    if (quote) { accepted.push({ ...cl, untrusted: true, preselected: false, buyerField: quote.field }); continue; }
+    const { untrusted: _u, preselected: _p, buyerField: _b, ...plain } = cl; // only the server decides what is a buyer quote
     const bad = unsupportedValues(cl.text, cl.refs, registry);
     if (bad.length) { rejected.push({ claimId: cl.id, reason: 'VALUE_NOT_IN_CITED_RECORD', values: bad }); continue; }
     const late = cl.refs.filter(r => r.type === 'tracker' && registryTiming(registry, registry.get(r.type, r.id)?.data).status !== 'BEFORE_DISPUTE');
@@ -285,9 +319,10 @@ export function validateClaims(claims, registry, { strict = false } = {}) {
       catalog ||= factCatalog(registry);
       const fact = matchFact(cl, registry, catalog);
       if (!fact) { rejected.push({ claimId: cl.id, reason: 'NOT_A_RECORDED_FACT' }); continue; }
-      accepted.push({ ...cl, factId: fact.id }); continue;
+      if (fact.untrusted) { rejected.push({ claimId: cl.id, reason: 'BUYER_WRITTEN_FIELD' }); continue; }
+      accepted.push({ ...plain, factId: fact.id }); continue;
     }
-    accepted.push(cl);
+    accepted.push(plain);
   }
   return { ok: rejected.length === 0 && accepted.length > 0, accepted, rejected };
 }
