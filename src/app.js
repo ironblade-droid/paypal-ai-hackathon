@@ -6,7 +6,8 @@ import { CATALOG, findSku } from './catalog.js';
 import { checkShipment } from './engine/risk.js';
 import { describeStatus, deadline, sandboxSimLinks } from './engine/status.js';
 import { validateClaims, allowedEvidenceTypes } from './engine/evidence.js';
-import { analyseDispute, submitDecision, aiAdvice, SubmitError } from './disputeService.js';
+import { analyseDispute, submitDecision, aiAdvice, approveProposal, SubmitError } from './disputeService.js';
+import { TOOLKIT_NAME, TOOLKIT_VERSION, READ_TOOLS, WRITE_TOOLS } from './ai/agent.js';
 import { LABELS } from './engine/labels.js';
 import { PayPalError } from './paypal/client.js';
 import { redact, log } from './lib/redact.js';
@@ -14,7 +15,7 @@ import { redact, log } from './lib/redact.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, '..', 'public');
 
-export function createApp({ api, store, engine, config, llm = null }) {
+export function createApp({ api, store, engine, config, llm = null, agentTools = null }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
@@ -33,7 +34,9 @@ export function createApp({ api, store, engine, config, llm = null }) {
     : res.status(401).json({ error: 'PASSCODE_REQUIRED', message: 'This demo host needs the reviewer passcode for actions that write to PayPal.' });
   const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 
-  const aiInfo = () => llm ? { configured: true, provider: llm.provider, model: llm.model, label: llm.label } : { configured: false, reason: 'No GEMINI_API_KEY or GROQ_API_KEY set' };
+  const aiInfo = () => llm ? { configured: true, provider: llm.provider, model: llm.model, label: llm.label,
+    agent: llm.languageModel && agentTools ? { toolkit: `${TOOLKIT_NAME} ${TOOLKIT_VERSION}`, integration: 'Vercel AI SDK', readTools: READ_TOOLS, proposalOnlyTools: [...WRITE_TOOLS, 'propose_provide_evidence', 'propose_make_offer'] } : null }
+    : { configured: false, reason: 'No GEMINI_API_KEY or GROQ_API_KEY set' };
   app.get('/favicon.ico', (_req, res) => res.status(204).end());
   app.get('/healthz', (_req, res) => res.json({ ok: true, sandbox: true, credentials: Boolean(api), dryRun: config.dryRun, engine: engine.name, ai: aiInfo() }));
   app.get('/api/config', (_req, res) => res.json({ clientId: config.clientId || null, environment: 'sandbox', credentials: Boolean(api), dryRun: config.dryRun,
@@ -127,7 +130,16 @@ export function createApp({ api, store, engine, config, llm = null }) {
 
   // AI advice (Gemini or Groq). Every drafted sentence has already passed the strict citation checker.
   app.post('/api/disputes/:id/ai', needApi, guard, wrap(async (req, res) => {
-    res.json(await aiAdvice({ api, store, engine, llm }, req.params.id, { refresh: Boolean(req.body?.refresh) }));
+    res.json(await aiAdvice({ api, store, engine, llm, agentTools }, req.params.id, { refresh: Boolean(req.body?.refresh) }));
+  }));
+  app.get('/api/disputes/:id/agent', (req, res) => res.json({ runs: store.data.agentRuns?.[req.params.id] || [] }));
+  app.post('/api/agent/proposals/:pid/approve', needApi, guard, wrap(async (req, res) => {
+    res.json(await approveProposal({ api, store, engine, config }, req.params.pid, req.body || {}));
+  }));
+  app.post('/api/agent/proposals/:pid/dismiss', guard, wrap(async (req, res) => {
+    const p = Object.values(store.data.agentRuns || {}).flat().flatMap(r => r.proposals || []).find(x => x.id === req.params.pid);
+    if (!p) return res.status(404).json({ error: 'UNKNOWN_PROPOSAL' });
+    if (p.status === 'PENDING_SELLER_APPROVAL') p.status = 'DISMISSED'; store.save?.(); res.json({ proposal: p });
   }));
 
   app.post('/api/disputes/:id/submit', needApi, guard, wrap(async (req, res) => {

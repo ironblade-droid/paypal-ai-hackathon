@@ -13,8 +13,12 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@ai-sdk/google": "^2.0.102",
+    "@paypal/agent-toolkit": "^1.11.0",
     "ag-grid-community": "^32.3.9",
-    "express": "^4.22.3"
+    "ai": "^5.0.273",
+    "express": "^4.22.3",
+    "zod": "^3.25.76"
   },
   "type": "module",
   "private": true,

@@ -6,6 +6,7 @@
 <div id="head" class="card">Loading dispute from PayPal…</div>
 <div id="waiting"></div>
 <div class="card ai" id="aiCard"></div>
+<div class="card" id="agentCard" style="display:none"></div>
 <div class="grid2">
   <div class="card" id="rec"></div>
   <div class="card" id="what"></div>
@@ -26,7 +27,7 @@ const currentPack = () => type === 'SUPPORTING_INFO' ? A.supporting : A.packs[ty
 function renderAi() {
   const c = PP.cfg?.ai;
   if (!c?.configured) { aiCard.innerHTML = `<h2>AI advisor</h2><p class="muted">Not configured on this server: set <code>GEMINI_API_KEY</code> (Google Gemini) or <code>GROQ_API_KEY</code> (Groq) and restart. Until then the rules engine below makes the recommendation. No AI output is shown or simulated.</p>`; return; }
-  let body = `<h2>AI advisor <small>${PP.esc(c.label)}</small></h2><p class="muted">The model recommends an action and picks supporting facts by id. It does not write the evidence text: each fact is a sentence ProofPilot renders from fields of the PayPal records below. Any free text the model returns is refused unless it is exactly one of those facts. The checker confirms a fact is in the cited record; it cannot tell whether the fact helps your case. You tick and approve each sentence before anything is sent.</p>`;
+  let body = `<h2>AI advisor <small>${PP.esc(c.label)}${c.agent ? ' · agent on ' + PP.esc(c.agent.toolkit) : ''}</small></h2><p class="muted">The model recommends an action and picks supporting facts by id. It does not write the evidence text: each fact is a sentence ProofPilot renders from fields of the PayPal records below. Any free text the model returns is refused unless it is exactly one of those facts. The checker confirms a fact is in the cited record; it cannot tell whether the fact helps your case. You tick and approve each sentence before anything is sent.</p>`;
   if (!AI) body += `<button id="askAi">Ask ${PP.esc(c.label)}</button>`;
   else if (!AI.ok) body += `<div class="banner err">The model call failed (${PP.esc(AI.error)}). Using the rules engine recommendation.</div><button class="sec" id="askAi">Try again</button>`;
   else {
@@ -44,7 +45,7 @@ function renderAi() {
   aiCard.innerHTML = body;
   if (window.askAi) askAi.onclick = async () => { askAi.disabled = true; askAi.textContent = 'Asking the model…';
     try { AI = await PP.api(`/api/disputes/${encodeURIComponent(id)}/ai`, { method: 'POST', body: { refresh: Boolean(AI) } }); } catch (e) { AI = { ok: false, error: e.message }; }
-    renderAi(); renderApprove(); };
+    renderAi(); renderApprove(); loadAgent(); };
   document.querySelectorAll('.aiPick').forEach(x => x.onchange = renderApprove);
 }
 
@@ -138,10 +139,38 @@ function renderApprove() {
   if (last && last.id === id && !out.innerHTML) out.innerHTML = `<div class="banner info">Last submission ${new Date(last.at).toLocaleString()}: ${PP.badge(last.before.label, 'act')} → ${PP.badge(last.after.label, 'review')}</div>`;
 }
 
+// ---- Agent activity: every PayPal Agent Toolkit call the agent made (reads ran; writes were only proposed).
+let AGENT = null;
+async function loadAgent() { try { const r = await PP.api(`/api/disputes/${encodeURIComponent(id)}/agent`); AGENT = r.runs?.[0] || null; } catch { AGENT = null; } renderAgent(); }
+function renderAgent() {
+  const info = PP.cfg?.ai?.agent; const run = AGENT;
+  if (!info && !run) { agentCard.style.display = 'none'; return; }
+  agentCard.style.display = '';
+  const kindChip = (k) => k === 'read' ? '<span class="minichip">read · ran</span>' : '<span class="minichip warn">write · proposed only</span>';
+  let h = `<h2>Agent activity <small>${PP.esc(info?.toolkit || run?.toolkit || '@paypal/agent-toolkit')} · ${PP.esc(PP.cfg?.ai?.model || run?.model || '')} · sandbox</small></h2>
+    <p class="muted">Read tools run on their own; results are redacted (no emails, names or addresses). Write tools never run on their own: the agent can only propose them, and a proposal runs only after you approve it here.</p>`;
+  if (!run) { agentCard.innerHTML = h + '<div class="muted">No agent run yet for this dispute. Use the AI advisor above.</div>'; return; }
+  h += `<small>Run ${new Date(run.at).toLocaleString()} · ${run.ok ? 'finished' : 'failed: ' + PP.esc(run.error || '')} · recommendation ${PP.esc(run.recommendation?.action || '-')} (${PP.esc(run.recommendation?.source || '-')})</small>
+    <table class="simple" id="agentLog"><tr><th>When</th><th>Tool</th><th>Kind</th><th>Arguments</th><th>Result (redacted)</th></tr>
+    ${run.activity.map(a => `<tr><td>${new Date(a.at).toLocaleTimeString()}</td><td><span class="chip">${PP.esc(a.tool)}</span></td><td>${kindChip(a.kind)}${a.ok ? '' : ' <span class="sev-BLOCK">error</span>'}</td>
+      <td><code>${PP.esc(JSON.stringify(a.args))}</code></td><td><details><summary>${PP.esc(String(a.result).slice(0, 70))}${String(a.result).length > 70 ? '…' : ''}</summary><pre>${PP.esc(a.result)}</pre></details></td></tr>`).join('') || '<tr><td colspan="5" class="muted">The agent made no tool calls.</td></tr>'}</table>`;
+  h += `<h3>Proposed actions (not executed)</h3>` + (run.proposals.length ? run.proposals.map(p => `<div class="claim ${p.status === 'BLOCKED' ? 'bad' : ''}">
+      <b>${PP.esc(p.tool)}</b> <code>${PP.esc(JSON.stringify(p.args))}</code> · status <b>${PP.esc(p.status)}</b>${p.reason ? ' · ' + PP.esc(p.reason) : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.kind === 'toolkit-write' ? `<div>Type APPROVE to run this on PayPal: <input size="9" id="pc-${p.id}"> <button class="sec" data-approve="${p.id}">Approve and run</button> <button class="sec" data-dismiss="${p.id}">Dismiss</button></div>` : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.kind === 'evidence' ? `<div><button class="sec" data-usepack="${PP.esc(p.args.evidence_type)}">Open in evidence pack</button> (sent only through Approve and submit below)</div>` : ''}
+    </div>`).join('') : '<div class="muted">The agent proposed no write action.</div>');
+  agentCard.innerHTML = h;
+  agentCard.querySelectorAll('[data-approve]').forEach(b => b.onclick = async () => { const pid = b.dataset.approve;
+    try { const r = await PP.api(`/api/agent/proposals/${pid}/approve`, { method: 'POST', body: { approved: true, confirm: document.getElementById('pc-' + pid).value } });
+      alert(r.dryRun ? 'Dry run: approved, nothing sent.' : 'Executed on PayPal sandbox.'); } catch (e) { alert(e.message); } loadAgent(); refresh(); });
+  agentCard.querySelectorAll('[data-dismiss]').forEach(b => b.onclick = async () => { await PP.api(`/api/agent/proposals/${b.dataset.dismiss}/dismiss`, { method: 'POST', body: {} }); loadAgent(); });
+  agentCard.querySelectorAll('[data-usepack]').forEach(b => b.onclick = () => { type = b.dataset.usepack; render(); pack.scrollIntoView(); });
+}
+
 async function refresh() {
   try { A = await PP.api(`/api/disputes/${encodeURIComponent(id)}`); render();
     clearTimeout(pollTimer); if (A.status.waiting) pollTimer = setTimeout(refresh, 15000);
   } catch (e) { head.innerHTML = `<div class="banner err">${PP.esc(e.message)}${e.data?.debugId ? ' (debug_id ' + PP.esc(e.data.debugId) + ')' : ''}</div>`; }
 }
-PP.configBanner(document.getElementById('cfg')).then(refresh);
+PP.configBanner(document.getElementById('cfg')).then(() => { refresh(); loadAgent(); });
 </script></body></html>

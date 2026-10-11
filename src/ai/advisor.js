@@ -97,7 +97,11 @@ export async function adviseWithLlm(provider, { dispute, allowedTypes, actions, 
   let raw;
   try { raw = await provider.completeJSON({ system: SYSTEM_PROMPT, user: buildUserPrompt({ dispute, allowedTypes, actions, registry, rules, rejectedTypes }) }); }
   catch (e) { return { available: true, ok: false, provider: provider.provider, model: provider.model, label: provider.label, error: e.message, fallback: rules }; }
-  const j = raw.json || {};
+  return finishAdvice(raw.json || {}, { provider, started, dispute, allowedTypes, actions, registry, packs, rules, rejectedTypes });
+}
+
+// Shared post-processing for the plain advisor and the PayPal Agent Toolkit agent: every guardrail below applies to both.
+export function finishAdvice(j, { provider, started = Date.now(), dispute, allowedTypes, actions, registry, packs, rules, rejectedTypes = [] }) {
   const flags = [];
   let action = String(j.action || '').toUpperCase();
   if (!(action in ACTION_NEEDS)) { flags.push(`Model returned an unknown action "${j.action}".`); action = null; }

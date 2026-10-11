@@ -1,5 +1,5 @@
 // Pluggable LLM providers. Keys come from env only and are registered for redaction; nothing is logged.
-//   Google Gemini: GEMINI_API_KEY, model GEMINI_MODEL (default gemini-3.8-flash, free tier per ai.google.dev pricing, Oct 2026)
+//   Google Gemini: GEMINI_API_KEY, model GEMINI_MODEL (default gemini-3.8-flash: verified live on 11 Oct 2026; gemini-2.5-flash and 2.5-flash-lite answer "no longer available to new users")
 //   Groq:          GROQ_API_KEY,   model GROQ_MODEL   (default openai/gpt-oss-20b; Groq retired its free Llama models on 16 Aug 2026)
 // Choose with PROOFPILOT_LLM_PROVIDER=gemini|groq when both keys are set (default: gemini).
 import { registerSecret } from '../lib/redact.js';
@@ -8,7 +8,7 @@ export const DEFAULT_MODELS = { gemini: 'gemini-3.8-flash', groq: 'openai/gpt-os
 
 export class LlmError extends Error { constructor(provider, status, message) { super(`${provider} ${status}: ${message}`); this.provider = provider; this.status = status; } }
 
-function parseJsonText(text) {
+export function parseJsonText(text) {
   const t = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '');
   try { return JSON.parse(t); } catch { const m = t.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); throw new Error('Model did not return JSON'); }
 }
@@ -17,6 +17,11 @@ export function geminiProvider({ apiKey, model = DEFAULT_MODELS.gemini, fetchImp
   registerSecret(apiKey);
   return {
     provider: 'gemini', model, label: `Google Gemini (${model})`,
+    // Vercel AI SDK model (used by the PayPal Agent Toolkit agent loop in src/ai/agent.js).
+    async languageModel() {
+      const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
+      return createGoogleGenerativeAI({ apiKey, fetch: fetchImpl })(model);
+    },
     async completeJSON({ system, user }) {
       const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },

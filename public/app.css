@@ -36,3 +36,6 @@ footer{max-width:1200px;margin:0 auto;padding:0 20px 30px;color:var(--muted);fon
 .ready{display:flex;align-items:center;gap:6px}.ready .bar{height:6px;width:70px;background:#e6e9ef;border-radius:3px;overflow:hidden}.ready .bar i{display:block;height:100%}
 .ai{border:1px solid #c9b8f5;background:linear-gradient(180deg,#faf8ff,#fff)}.ai h2{color:#4b2fa8}
 .testdata{display:inline-block;background:#fff3d6;color:#7a4b00;border:1px solid #f1d38a;border-radius:4px;font-size:11px;padding:0 5px;margin-left:4px}
+
+.minichip.warn{background:#fff3cd;color:#7a5200;border-color:#f0d58a}
+#agentLog td{vertical-align:top;font-size:12px}#agentLog code{font-size:11px;word-break:break-all}#agentLog pre{max-width:520px;white-space:pre-wrap;word-break:break-all;font-size:11px}

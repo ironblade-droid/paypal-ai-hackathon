@@ -26,7 +26,7 @@ test('provider selection and default models', () => {
   assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).provider, 'gemini');
   assert.equal(createLlmProvider({ GROQ_API_KEY: 'q-key-1234567890' }).provider, 'groq');
   assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890', GROQ_API_KEY: 'q-key-1234567890', PROOFPILOT_LLM_PROVIDER: 'groq' }).provider, 'groq');
-  assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).model, DEFAULT_MODELS.gemini);
+  assert.equal(createLlmProvider({ GEMINI_API_KEY: 'g-key-1234567890' }).model, DEFAULT_MODELS.gemini); assert.equal(DEFAULT_MODELS.gemini, 'gemini-3.8-flash');
   assert.equal(createLlmProvider({ GROQ_API_KEY: 'q-key-1234567890', GROQ_MODEL: 'x/y' }).model, 'x/y');
 });
 
@@ -115,7 +115,7 @@ test('app: /ai route uses the configured provider; AI sentences are re-checked s
   const s = await new Promise(r => { const x = app.listen(0, () => r(x)); }); const base = `http://127.0.0.1:${s.address().port}`;
   const post = async (p, b) => (await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) })).json();
   const cfg = await (await fetch(base + '/api/config')).json();
-  assert.deepEqual(cfg.ai, { configured: true, provider: 'mock', model: 'mock-model', label: 'Mock (tests only)' });
+  assert.deepEqual(cfg.ai, { configured: true, provider: 'mock', model: 'mock-model', label: 'Mock (tests only)', agent: null });
   const ai = await post('/api/disputes/PP-D-1/ai', {});
   assert.equal(ai.ok, true); assert.equal(ai.narrative.accepted[0].id, 'ai-1'); assert.equal(ai.narrative.accepted[0].text, 'The buyer paid USD 5.50.');
   const sub = (customClaims) => post('/api/disputes/PP-D-1/submit', { action: 'provide_evidence', evidenceType: 'PROOF_OF_FULFILLMENT', approved: true, confirm: 'APPROVE', packHash: 'x', customClaims });

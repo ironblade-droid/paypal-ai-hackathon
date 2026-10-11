@@ -1,5 +1,6 @@
 // Dispute analysis: live PayPal reads -> status, deadline, allowed evidence types, cited packs, recommendation.
 import { adviseWithLlm } from './ai/advisor.js';
+import { runAgent } from './ai/agent.js';
 import { allowedEvidenceTypes, gatherRecords, buildPack, validateClaims, packHash, toEvidencePayload, packPdf, meetsRequirement } from './engine/evidence.js';
 import { refusalsFor, derivedRefusalRisks } from './lib/refusals.js';
 import { describeStatus, deadline, sellerActions, sandboxSimLinks } from './engine/status.js';
@@ -110,15 +111,55 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
 }
 
 // AI advice for one dispute (on demand; cached per dispute update_time so the free tier is not wasted).
+// With Gemini and PayPal credentials, this runs the PayPal Agent Toolkit agent (read tools autonomous, writes proposed
+// only). Otherwise the plain JSON advisor. Both share the same checker and fallback (finishAdvice).
 const aiCache = new Map();
-export async function aiAdvice({ api, store, engine, llm }, id, { refresh = false } = {}) {
+export const heldWrites = new Map(); // proposal id -> { tool, args, execute } (server memory only, never sent to clients)
+export async function aiAdvice({ api, store, engine, llm, agentTools }, id, { refresh = false } = {}) {
   const a = await analyseDispute({ api, store, engine }, id);
-  const key = `${id}|${a.updateTime}|${llm?.model || 'none'}`;
-  if (!refresh && aiCache.has(key)) return { ...aiCache.get(key), cached: true };
-  const out = await adviseWithLlm(llm, { dispute: a._ctx.dispute, allowedTypes: a.allowedTypes, actions: a.status.actions,
-    registry: a._ctx.recs.registry, packs: a.packs, rules: a.recommendation, rejectedTypes: [...new Set(a.paypalRejected.map(r => r.type))] });
+  const useAgent = Boolean(llm?.languageModel && agentTools);
+  const key = `${id}|${a.updateTime}|${llm?.model || 'none'}|${useAgent ? 'agent' : 'plain'}`;
+  // Agent runs are not cached: each run is logged with its own tool calls and proposals.
+  if (!useAgent && !refresh && aiCache.has(key)) return { ...aiCache.get(key), cached: true };
+  const ctx = { dispute: a._ctx.dispute, allowedTypes: a.allowedTypes, actions: a.status.actions,
+    registry: a._ctx.recs.registry, packs: a.packs, rules: a.recommendation, rejectedTypes: [...new Set(a.paypalRejected.map(r => r.type))] };
+  let out;
+  if (useAgent) {
+    out = await runAgent({ provider: llm, rawTools: typeof agentTools === 'function' ? agentTools() : agentTools, ctx, generateTextImpl: agentTools.generateTextImpl });
+    const held = out._held || {}; delete out._held;
+    const props = out.agent?.proposals || [];
+    for (const p of props) if (held[p.tool]) heldWrites.set(p.id, { tool: p.tool, args: p.args, execute: held[p.tool] });
+    store.data.agentRuns ||= {};
+    (store.data.agentRuns[id] ||= []).unshift({ at: new Date().toISOString(), model: llm.model, toolkit: out.agent?.toolkit, ok: out.ok,
+      recommendation: out.recommendation, activity: out.agent?.activity || [], proposals: props, flags: out.flags || [], error: out.error });
+    store.data.agentRuns[id] = store.data.agentRuns[id].slice(0, 10);
+    store.save?.();
+  } else out = await adviseWithLlm(llm, ctx);
   if (out.ok) aiCache.set(key, out);
-  if (out.available) store.audit({ type: 'AI_ADVICE', disputeId: id, provider: out.provider, model: out.model, ok: out.ok,
-    action: out.recommendation?.action, refused: (out.narrative?.refused?.length || 0) + (out.rationale?.refused?.length || 0) });
+  if (out.available) store.audit({ type: useAgent ? 'AGENT_RUN' : 'AI_ADVICE', disputeId: id, provider: out.provider, model: out.model, ok: out.ok,
+    action: out.recommendation?.action, tools: (out.agent?.activity || []).map(x => `${x.kind}:${x.tool}`),
+    refused: (out.narrative?.refused?.length || 0) + (out.rationale?.refused?.length || 0) });
   return out;
+}
+
+// Seller approval gate for agent-proposed toolkit writes. Nothing runs without approved=true and confirm "APPROVE",
+// and PayPal must still offer the action. Evidence and offer proposals go through the normal pack approval instead.
+export async function approveProposal({ api, store, engine, config }, proposalId, body) {
+  const all = Object.values(store.data.agentRuns || {}).flat().flatMap(r => r.proposals || []);
+  const p = all.find(x => x.id === proposalId);
+  if (!p) throw new SubmitError('UNKNOWN_PROPOSAL', 'No such agent proposal.');
+  if (body?.approved !== true || body?.confirm !== 'APPROVE') throw new SubmitError('NOT_APPROVED', 'Seller approval is required: send approved=true and confirm="APPROVE".');
+  if (p.status !== 'PENDING_SELLER_APPROVAL') throw new SubmitError('NOT_PENDING', `Proposal is ${p.status}.`);
+  if (p.kind !== 'toolkit-write') throw new SubmitError('USE_EVIDENCE_APPROVAL', 'Evidence and offer proposals are approved in the evidence pack panel (hash-bound).');
+  const held = heldWrites.get(p.id);
+  if (!held) throw new SubmitError('PROPOSAL_EXPIRED', 'This proposal was made before a restart. Ask the agent again.');
+  if (p.tool === 'accept_dispute_claim') {
+    const a = await analyseDispute({ api, store, engine }, p.disputeId);
+    if (!a.status.actions.includes('accept_claim')) throw new SubmitError('ACTION_NOT_OFFERED', 'PayPal does not offer accept_claim on this dispute now.');
+  }
+  store.audit({ type: 'AGENT_PROPOSAL_APPROVED', proposalId: p.id, tool: p.tool, dryRun: Boolean(config.dryRun) });
+  if (config.dryRun) { p.status = 'APPROVED_DRY_RUN'; store.save?.(); return { dryRun: true, proposal: p }; }
+  const result = await held.execute(held.args, {});
+  p.status = 'EXECUTED_AFTER_APPROVAL'; p.executedAt = new Date().toISOString(); heldWrites.delete(p.id); store.save?.();
+  return { dryRun: false, proposal: p, result: JSON.parse(JSON.stringify(result ?? null)) };
 }
