@@ -145,7 +145,7 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
   // proposal still has an unused code, so the UI knows to show the input box.
   app.get('/api/disputes/:id/agent', guard, (req, res) => res.json({ runs: (store.data.agentRuns?.[req.params.id] || []).map(r => ({ ...r,
     proposals: (r.proposals || []).map(p => ({ ...publicProposal(p), liveCode: p.status === 'PENDING_SELLER_APPROVAL' && heldWrites.has(p.id) })) })),
-    writes: (store.data.disputeWrites?.[req.params.id] || []).map(w => ({ at: w.at, source: w.source, kind: w.kind, amount: w.amount, dryRun: Boolean(w.dryRun), failed: Boolean(w.failed) })) }));
+    writes: (store.data.disputeWrites?.[req.params.id] || []).map(w => ({ at: w.at, source: w.source, kind: w.kind, amount: w.amount, dryRun: Boolean(w.dryRun), failed: Boolean(w.failed), httpStatus: w.httpStatus ?? null, debugId: w.debugId ?? null })) }));
   // A committed, recorded agent run for demos when the live model is rate-limited or not configured. Always labelled
   // CACHED_DEMO; its proposals are not approvable and nothing in it is re-run.
   app.get('/api/demo/cached-agent-run', guard, (_req, res) => { const d = loadCachedDemoRun(); return d ? res.json(d) : res.status(404).json({ error: 'NO_CACHED_RUN' }); });

@@ -138,7 +138,7 @@ function renderApprove() {
   const n = p ? selectedClaims().claims.length : 0; const nAi = aiPicked().length;
   approve.innerHTML = `<h2>Approve and submit</h2>
     ${canEvidence ? `<p>Send <b>${n}</b> cited statement(s)${nAi ? ` (${nAi} AI-drafted)` : ''} as <b>${PP.esc(PP.h('evidence', type))}</b> (${PP.esc(PP.h('action', evidenceAction))}). A PDF of the pack is attached.</p>` : `<p class="muted">Evidence submission is not available: ${p ? [!acts.includes(evidenceAction) ? `PayPal does not offer ${PP.esc(PP.h('action', evidenceAction))} now` : '', !(p.requirementMet || type === 'SUPPORTING_INFO') ? 'the pack is incomplete' : '', refused ? 'PayPal already refused this type here' : ''].filter(Boolean).join('; ') : 'no pack'}.</p>`}
-    ${acts.includes('make_offer') ? `<p>Offer amount (${PP.esc(A.amount.currency_code)}): <input id="offerAmt" size="8" placeholder="${PP.esc(A.amount.value)}"></p>` : ''}
+    ${acts.includes('make_offer') ? `<p>Offer amount (${PP.esc(A.amount.currency_code)}): <input id="offerAmt" size="8" placeholder="amount" value="${PP.esc(PP.defaultOfferAmount(A.amount, AGENT?.proposals, AI?.offerAmount))}"> <small class="muted">at most ${PP.esc(A.amount.value)}</small></p>` : ''}
     ${canEvidence ? '<label><input type="checkbox" id="attachPdf" checked> Attach a PDF copy of the pack</label>' : ''}
     ${(A.paypalRejected || []).map(r => `<div class="gap">PayPal rejected ${PP.esc(PP.h('evidence', r.type))} on this dispute ${r.at ? 'at ' + new Date(r.at).toLocaleString() : '(time not recorded)'} (PayPal said this evidence type is not allowed; PayPal debug id ${PP.esc(r.debugId)}).</div>`).join('')}
     <label>Type APPROVE to confirm you reviewed every statement</label><input id="conf" size="12">
@@ -148,7 +148,7 @@ function renderApprove() {
     out.innerHTML = 'Submitting to PayPal…';
     try { const r = await PP.api(`/api/disputes/${encodeURIComponent(id)}/submit`, { method: 'POST', body: { ...body, approved: true, confirm: conf.value } });
       sessionStorage.setItem('pp-last-submit', JSON.stringify({ id, at: new Date().toISOString(), before: r.before, after: r.after }));
-      out.innerHTML = `<div class="banner info" id="submitResult">${r.dryRun ? 'Dry run, nothing sent. ' : 'Sent to PayPal. '}Status: ${PP.badge(r.before.label, 'act')} → ${PP.badge(r.after.label, 'review')}</div><pre>${PP.esc(JSON.stringify(r.payloadPreview, null, 2))}</pre>`;
+      out.innerHTML = `<div class="banner info" id="submitResult">${r.dryRun ? 'Dry run, nothing sent. ' : 'Sent to PayPal. '}${r.paypal?.debugId ? `PayPal HTTP ${PP.esc(r.paypal.status ?? '')}, debug id <code>${PP.esc(r.paypal.debugId)}</code>. ` : ''}Status: ${PP.badge(r.before.label, 'act')} → ${PP.badge(r.after.label, 'review')}</div><pre>${PP.esc(JSON.stringify(r.payloadPreview, null, 2))}</pre>`;
       setTimeout(refresh, 4000);
     } catch (e) { out.innerHTML = `<div class="banner err">${PP.esc(e.message)}${e.data?.rejected ? '<pre>' + PP.esc(JSON.stringify(e.data.rejected, null, 2)) + '</pre>' : ''}</div>`; }
   };
@@ -163,7 +163,8 @@ function renderApprove() {
 
 // ---- Agent activity: every PayPal Agent Toolkit call the agent made (reads ran; writes were only proposed).
 let AGENT = null; let AGENT_WRITES = [];
-async function loadAgent() { try { const r = await PP.api(`/api/disputes/${encodeURIComponent(id)}/agent`); AGENT = r.runs?.[0] || null; AGENT_WRITES = r.writes || []; } catch { AGENT = null; } renderAgent(); }
+async function loadAgent() { try { const r = await PP.api(`/api/disputes/${encodeURIComponent(id)}/agent`); AGENT = r.runs?.[0] || null; AGENT_WRITES = r.writes || []; } catch { AGENT = null; } renderAgent();
+  if (window.offerAmt && !offerAmt.value && A) offerAmt.value = PP.defaultOfferAmount(A.amount, AGENT?.proposals, AI?.offerAmount); }
 function renderAgent() {
   const info = PP.cfg?.ai?.agent; const run = AGENT;
   if (!info && !run) { agentCard.style.display = 'none'; return; }
@@ -176,10 +177,11 @@ function renderAgent() {
     <table class="simple" id="agentLog"><tr><th>When</th><th>Step</th><th>Kind</th><th>Arguments</th><th>Result (redacted)</th></tr>
     ${run.activity.map(a => `<tr><td>${new Date(a.at).toLocaleTimeString()}</td><td title="PayPal Agent Toolkit tool: ${PP.esc(a.tool)}">${PP.esc(PP.h('tool', a.tool))}</td><td>${kindChip(a.kind)}${a.ok ? '' : ' <span class="sev-BLOCK">error</span>'}</td>
       <td>${a.kind === 'read' ? `<code>${PP.esc(JSON.stringify(a.args))}</code>` : `<small>model's arguments not used${a.args?.fields?.length ? ' (it supplied: ' + PP.esc(a.args.fields.join(', ')) + ')' : ''}</small>`}</td><td><details><summary>${PP.esc(String(a.result).slice(0, 70))}${String(a.result).length > 70 ? '…' : ''}</summary><pre>${PP.esc(a.result)}</pre></details></td></tr>`).join('') || '<tr><td colspan="5" class="muted">The agent made no tool calls.</td></tr>'}</table>`;
-  if ((AGENT_WRITES || []).some(w => !w.dryRun && !w.failed)) h += `<div class="banner info">ProofPilot already sent a ${PP.esc(AGENT_WRITES.filter(w => !w.dryRun && !w.failed).map(w => w.kind).join(', '))} on this dispute. Only one write per dispute: new proposals are blocked.</div>`;
+  if ((AGENT_WRITES || []).some(w => !w.dryRun && !w.failed)) h += `<div class="banner info">ProofPilot already sent a ${PP.esc(AGENT_WRITES.filter(w => !w.dryRun && !w.failed).map(w => w.kind + (w.debugId ? ` (HTTP ${w.httpStatus ?? '?'}, PayPal debug id ${w.debugId})` : '')).join(', '))} on this dispute. Only one write per dispute: new proposals are blocked.</div>`;
   const statusWords = { PENDING_SELLER_APPROVAL: 'waiting for your approval', BLOCKED: 'blocked by ProofPilot', BLOCKED_AT_APPROVAL: 'blocked when re-checked against PayPal', APPROVED_DRY_RUN: 'approved (dry run, nothing sent)', EXECUTED_AFTER_APPROVAL: 'sent to PayPal after your approval', DISMISSED: 'dismissed', EXPIRED: 'approval code expired', VOIDED: 'voided after wrong codes', RECORDED: 'recorded', CACHED_NOT_APPROVABLE: 'cached demo, not approvable' };
   h += `<h3>Proposed actions (not executed)</h3><p class="muted">ProofPilot rebuilds every proposal from the dispute's own PayPal records: same case, same payment, at most the disputed amount, same currency, and only if it matches the final recommendation. Notes to PayPal and the buyer are ProofPilot templates, never the model's text.</p>` + (run.proposals.length ? run.proposals.map(p => `<div class="claim ${/BLOCKED/.test(p.status) ? 'bad' : ''}">
       <b>${PP.esc(PP.h('tool', p.tool))}</b>: ${PP.esc(p.description || '')} · <b>${PP.esc(statusWords[p.status] || PP.h('x', p.status))}</b>
+      ${p.paypal?.debugId ? `<div>PayPal HTTP ${PP.esc(p.paypal.status ?? '')} · debug id <code>${PP.esc(p.paypal.debugId)}</code></div>` : ''}
       ${(p.blockedReasons || []).length ? `<div>Why: ${PP.esc(p.blockedReasons.map(r => PP.h('binding', r)).join('; '))}</div>` : ''}
       ${p.canonical ? `<details><summary>Exactly what would be sent</summary><pre>${PP.esc(JSON.stringify(p.canonical, null, 2))}</pre><small>Proposal hash ${PP.esc(String(p.hash || '').slice(0, 16))}</small></details>` : ''}
       ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && p.liveCode ? `<div>To run this on PayPal, type the approval code for proposal <code>${PP.esc(p.id)}</code>. It is printed only in the ProofPilot server console (the terminal running <code>npm start</code>, or your host's private log), never sent to this page or the API. Single use, expires ${new Date(p.tokenExpiresAt).toLocaleTimeString()}.<br><input size="22" id="pc-${p.id}" placeholder="APPROVE-XXXXX-XXXXX" autocomplete="off"> <button class="sec" data-approve="${p.id}">Approve and run</button> <button class="sec" data-dismiss="${p.id}">Dismiss</button></div>` : ''}
@@ -189,7 +191,7 @@ function renderAgent() {
   agentCard.innerHTML = h;
   agentCard.querySelectorAll('[data-approve]').forEach(b => b.onclick = async () => { const pid = b.dataset.approve;
     try { const r = await PP.api(`/api/agent/proposals/${pid}/approve`, { method: 'POST', body: { approved: true, token: document.getElementById('pc-' + pid).value } });
-      alert(r.dryRun ? 'Dry run: approved and re-checked against PayPal, nothing sent.' : 'Sent to PayPal sandbox.'); } catch (e) { alert(e.message); } loadAgent(); refresh(); });
+      alert(r.dryRun ? 'Dry run: approved and re-checked against PayPal, nothing sent.' : `Sent to PayPal sandbox.${r.paypal?.debugId ? ` HTTP ${r.paypal.status ?? ''}, PayPal debug id ${r.paypal.debugId}.` : ''}`); } catch (e) { alert(e.message); } loadAgent(); refresh(); });
   agentCard.querySelectorAll('[data-dismiss]').forEach(b => b.onclick = async () => { await PP.api(`/api/agent/proposals/${b.dataset.dismiss}/dismiss`, { method: 'POST', body: {} }); loadAgent(); });
   agentCard.querySelectorAll('[data-usepack]').forEach(b => b.onclick = () => { type = b.dataset.usepack; render(); pack.scrollIntoView(); });
 }

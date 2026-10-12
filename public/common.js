@@ -12,6 +12,16 @@ window.PP = {
     if (!res.ok) { const e = new Error(data.message || data.issue || data.error || res.statusText); e.data = data; e.status = res.status; throw e; }
     return data;
   },
+  // Default for the manual offer box: the pending (else most recent) offer proposal's amount, else the AI's suggested
+  // offer, else empty. Never the full disputed amount.
+  defaultOfferAmount(disputed, proposals = [], aiOffer = null) {
+    const full = String(disputed?.value ?? '').trim(); const cur = disputed?.currency_code;
+    const ok = (v) => { const s = String(v ?? '').trim(); return s && s !== full && Number(s) !== Number(full) && Number(s) > 0 ? s : ''; };
+    const offers = (proposals || []).filter(p => p?.tool === 'propose_make_offer' && p.canonical?.amount?.value && (!cur || !p.canonical.amount.currency_code || p.canonical.amount.currency_code === cur));
+    const pending = offers.find(p => p.status === 'PENDING_SELLER_APPROVAL');
+    const latest = [...offers].sort((a, b) => String(b.createdAt || b.executedAt || b.tokenExpiresAt || b.at || '').localeCompare(String(a.createdAt || a.executedAt || a.tokenExpiresAt || a.at || '')))[0];
+    return ok(pending?.canonical.amount.value) || ok(latest?.canonical.amount.value) || ok(aiOffer) || '';
+  },
   esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); },
   // Plain words for a PayPal code; the raw code stays available as a tooltip.
   h(kind, code) { if (code == null || code === '') return ''; return PP.labels?.[kind]?.[code] || String(code).toLowerCase().replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()); },

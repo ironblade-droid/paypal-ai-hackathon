@@ -8,6 +8,7 @@ import { checkAmountWithin, parseAmount } from './lib/money.js';
 import { refusalsFor, derivedRefusalRisks } from './lib/refusals.js';
 import { human } from './engine/labels.js';
 import { redact } from './lib/redact.js';
+import { paypalMeta } from './paypal/client.js';
 import { removeApprovalCodeFile, deliverApprovalCode } from './lib/approvalCodes.js';
 import { describeStatus, deadline, sellerActions, sandboxSimLinks } from './engine/status.js';
 
@@ -130,7 +131,11 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
     });
     if (again.length) { writesInFlight.delete(id); throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'ProofPilot already sent a refund or accept on this dispute (or one is running), or this would exceed the disputed amount.', { reasons: again }); }
   }
-  try { return await sendDecision({ api, store, config }, { id, a, action, body, before, call, payloadPreview, approval }); }
+  try {
+    const out = await sendDecision({ api, store, config }, { id, a, action, body, before, call, payloadPreview, approval });
+    if (manualEntry) updateWrite(store, manualEntry.id, { httpStatus: out.paypal.status, debugId: out.paypal.debugId });
+    return out;
+  }
   catch (e) {
     // PayPal refused it (4xx with an issue code): nothing happened, so the ledger entry does not count. Anything else
     // (timeout, 5xx) stays counted: fail closed.
@@ -153,8 +158,9 @@ async function sendDecision({ api, store }, { id, a, action, body, before, call,
   }
   const fresh = await api.getDispute(id);
   const after = { status: fresh.status, stage: fresh.dispute_life_cycle_stage, label: describeStatus(fresh).label };
-  store.audit({ type: 'SUBMIT', disputeId: id, action, before, after });
-  return { dryRun: false, before, after, payloadPreview, response: { links: (response?.links || []).map(l => l.rel) }, approval };
+  const meta = paypalMeta(response);
+  store.audit({ type: 'SUBMIT', disputeId: id, action, before, after, httpStatus: meta.status, debugId: meta.debugId });
+  return { dryRun: false, before, after, payloadPreview, response: { links: (response?.links || []).map(l => l.rel) }, approval, paypal: meta };
 }
 
 // ---------- One write per dispute (review v0.4, finding 2)
@@ -407,9 +413,18 @@ async function runApproved({ api, store, engine, config }, p, h, kind, reservati
         : `ProofPilot could not confirm whether PayPal carried out this action (${msg}). It still counts as a write on this dispute, so nothing else will be sent automatically. Check the dispute in PayPal.`,
       { proposal: publicProposal(p) });
   }
-  if (reservation) updateWrite(store, reservation.id, { state: 'EXECUTED' });
-  p.status = 'EXECUTED_AFTER_APPROVAL'; p.executedAt = new Date().toISOString(); store.save?.();
-  store.audit({ type: 'AGENT_PROPOSAL_EXECUTED', proposalId: p.id, tool: p.tool });
+  const meta = writeMeta(result);
+  if (reservation) updateWrite(store, reservation.id, { state: 'EXECUTED', httpStatus: meta.status, debugId: meta.debugId });
+  p.status = 'EXECUTED_AFTER_APPROVAL'; p.executedAt = new Date().toISOString(); p.paypal = meta; store.save?.();
+  store.audit({ type: 'AGENT_PROPOSAL_EXECUTED', proposalId: p.id, tool: p.tool, httpStatus: meta.status, debugId: meta.debugId });
   let parsed = result; if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { /* keep text */ } }
-  return { dryRun: false, proposal: publicProposal(p), sent: p.canonical, result: JSON.parse(JSON.stringify(parsed ?? null)) };
+  return { dryRun: false, proposal: publicProposal(p), sent: p.canonical, paypal: meta, result: JSON.parse(JSON.stringify(parsed ?? null)) };
+}
+// Status and debug id of a successful write: from our own client (header), or, for Agent Toolkit results that carry
+// no headers, a debug_id in the returned body when there is one.
+function writeMeta(result) {
+  const m = paypalMeta(result);
+  if (m.status || m.debugId) return m;
+  let b = result; if (typeof b === 'string') { try { b = JSON.parse(b); } catch { b = null; } }
+  return { status: null, debugId: (b && typeof b === 'object' && (b.debug_id || b.debugId)) || null };
 }

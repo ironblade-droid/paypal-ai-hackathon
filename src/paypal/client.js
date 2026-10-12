@@ -10,6 +10,19 @@ export class PayPalError extends Error {
   }
 }
 
+// HTTP status and paypal-debug-id header of a successful call, kept off the JSON (non-enumerable) so callers that
+// serialise the body are unchanged. Read it with paypalMeta(result).
+export const PAYPAL_META = Symbol.for('proofpilot.paypalMeta');
+export function paypalMeta(result) {
+  const m = result && typeof result === 'object' ? result[PAYPAL_META] : null;
+  return m ? { status: m.status ?? null, debugId: m.debugId ?? null } : { status: null, debugId: null };
+}
+function withMeta(parsed, meta) {
+  const target = parsed && typeof parsed === 'object' ? parsed : {};
+  Object.defineProperty(target, PAYPAL_META, { value: meta, enumerable: false, configurable: true });
+  return target;
+}
+
 export function createPayPalClient({ clientId, clientSecret, fetchImpl = globalThis.fetch }) {
   if (!clientId || !clientSecret) throw new Error('PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET must be set');
   registerSecret(clientSecret);
@@ -39,8 +52,9 @@ export function createPayPalClient({ clientId, clientSecret, fetchImpl = globalT
     const res = await fetchImpl(PAYPAL_API_BASE + path, { method, headers: h, body });
     const text = await res.text();
     let parsed = null; try { parsed = text ? JSON.parse(text) : null; } catch { parsed = { raw: text.slice(0, 500) }; }
-    if (!res.ok) throw new PayPalError(res.status, parsed, path);
-    return parsed;
+    const headerDebugId = res.headers?.get?.('paypal-debug-id') || null;
+    if (!res.ok) { const err = new PayPalError(res.status, parsed, path); if (!err.debugId && headerDebugId) err.debugId = headerDebugId; throw err; }
+    return withMeta(parsed, { status: res.status, debugId: headerDebugId || parsed?.debug_id || null });
   }
 
   return {
