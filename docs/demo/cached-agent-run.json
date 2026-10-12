@@ -1,7 +1,7 @@
 {
  "kind": "CACHED_DEMO",
  "label": "CACHED DEMO RUN: recorded earlier, NOT a live model answer and NOT about the dispute you are viewing",
- "why": "Shown only when the live model is rate-limited (Gemini free tier: 20 requests per model per day) or no AI key is set, so judges can still see what a real agent run looks like. Nothing in it is re-run, and its proposal cannot be approved.",
+ "why": "Shown only when the live model is rate-limited or no AI key is set, so judges can still see what a real agent run looks like. Nothing in it is re-run, and its proposal cannot be approved.",
  "recorded_at_ist": "2026-10-11 17:16 IST",
  "recorded_on_dispute": "PP-R-PGV-10190981",
  "server_mode_when_recorded": {

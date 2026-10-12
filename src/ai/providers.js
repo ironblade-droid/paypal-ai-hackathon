@@ -59,6 +59,11 @@ export function createLlmProvider(env = process.env, fetchImpl = globalThis.fetc
   const want = (env.PROOFPILOT_LLM_PROVIDER || '').toLowerCase();
   const gem = env.GEMINI_API_KEY && geminiProvider({ apiKey: env.GEMINI_API_KEY, model: env.GEMINI_MODEL || DEFAULT_MODELS.gemini, fetchImpl });
   const grq = env.GROQ_API_KEY && groqProvider({ apiKey: env.GROQ_API_KEY, model: env.GROQ_MODEL || DEFAULT_MODELS.groq, fetchImpl });
-  if (want === 'groq') return grq || gem || null;
-  return gem || grq || null;
+  const pick = want === 'groq' ? (grq || gem || null) : (gem || grq || null);
+  if (!pick) return null;
+  // keysSet: which providers have a key present (a key being set does not mean it works).
+  pick.keysSet = [gem && 'gemini', grq && 'groq'].filter(Boolean);
+  // Automatic backup: when Gemini is rate-limited, the same run is retried once on Groq (plain advisor, no write tools).
+  pick.backup = pick.provider === 'gemini' && grq ? grq : null;
+  return pick;
 }

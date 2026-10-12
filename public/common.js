@@ -33,7 +33,7 @@ window.PP = {
   },
   async configBanner(el) {
     const c = await PP.api('/api/config'); PP.labels = c.labels || {}; PP.cfg = c;
-    const tag = document.getElementById('aiTag'); if (tag) tag.textContent = c.ai?.configured ? `AI: ${c.ai.label}` : 'AI: not configured (rules engine only)';
+    const tag = document.getElementById('aiTag'); if (tag) tag.textContent = c.ai?.keySet ? `AI key set: ${c.ai.label}${c.ai.backup ? ' (backup: ' + c.ai.backup.provider + ')' : ''}` : 'AI: no key set (rules engine only)';
     if (!c.credentials) el.innerHTML = '<div class="banner err">PayPal sandbox credentials are not set. Export PAYPAL_SANDBOX_CLIENT_ID and PAYPAL_SANDBOX_CLIENT_SECRET, then restart. See README.</div>';
     else if (c.dryRun) el.innerHTML = '<div class="banner info">Dry-run mode: ProofPilot reads from PayPal but will not submit anything.</div>';
     return c;

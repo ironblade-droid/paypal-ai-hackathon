@@ -41,10 +41,10 @@ function demoHtml() {
 function wireDemo() { if (window.showDemo) showDemo.onclick = async () => { try { DEMO = await PP.api('/api/demo/cached-agent-run'); } catch (e) { DEMO = null; alert(e.message); } renderAi(); }; }
 function renderAi() {
   const c = PP.cfg?.ai;
-  if (!c?.configured) { aiCard.innerHTML = `<h2>AI advisor ${runBadge('RULES_FALLBACK')}</h2><p class="muted">Not configured on this server: set <code>GEMINI_API_KEY</code> (Google Gemini) or <code>GROQ_API_KEY</code> (Groq) and restart. Until then the rules engine below makes the recommendation. No AI output is simulated; you can look at a recorded agent run, clearly marked as cached.</p>${DEMO ? demoHtml() : demoButton()}`; wireDemo(); return; }
+  if (!c?.keySet) { aiCard.innerHTML = `<h2>AI advisor ${runBadge('RULES_FALLBACK')}</h2><p class="muted">No AI key set on this server: set <code>GEMINI_API_KEY</code> (Google Gemini) or <code>GROQ_API_KEY</code> (Groq) and restart. Until then the rules engine below makes the recommendation. No AI output is simulated; you can look at a recorded agent run, clearly marked as cached.</p>${DEMO ? demoHtml() : demoButton()}`; wireDemo(); return; }
   let body = `<h2>AI advisor <small>${PP.esc(c.label)}${c.agent ? ' · agent on ' + PP.esc(c.agent.toolkit) : ''}</small></h2><p class="muted">The model recommends an action and picks supporting facts by id. It does not write the evidence text: each fact is a sentence ProofPilot renders from fields of the PayPal records below. Any free text the model returns is refused unless it is exactly one of those facts. The checker confirms a fact is in the cited record; it cannot tell whether the fact helps your case. You tick and approve each sentence before anything is sent.</p>`;
   if (!AI) body += `<button id="askAi">Ask ${PP.esc(c.label)}</button>`;
-  else if (!AI.ok) body += `<div class="banner err">${runBadge('RULES_FALLBACK')} ${AI.run?.liveError === 'RATE_LIMITED' ? 'The live model is rate-limited (Gemini free tier: 20 requests per model per day).' : 'The model call failed (' + PP.esc(AI.error) + ').'} Using the rules engine recommendation.</div><button class="sec" id="askAi">Try again</button> ${AI.cachedDemo?.available ? (DEMO ? '' : demoButton()) : ''}${demoHtml()}`;
+  else if (!AI.ok) body += `<div class="banner err">${runBadge('RULES_FALLBACK')} ${AI.run?.liveError === 'RATE_LIMITED' ? 'The live model hit its rate limit.' + (AI.run?.backupTried ? ' The ' + PP.esc(AI.run.backupTried) + ' backup was tried and also failed.' : '') : 'The model call failed (' + PP.esc(AI.error) + ').'} Using the rules engine recommendation.</div><button class="sec" id="askAi">Try again</button> ${AI.cachedDemo?.available ? (DEMO ? '' : demoButton()) : ''}${demoHtml()}`;
   else {
     const r = AI.recommendation;
     const refusedAll = [...AI.rationale.refused, ...AI.narrative.refused];
@@ -58,7 +58,7 @@ function renderAi() {
         <p class="muted">This is the model's own wording. It was refused and is never sent to PayPal.</p>
         ${refusedAll.map(x => `<div class="claim bad">${PP.esc(PP.h('refusal', x.reason))}: <s>${PP.esc(x.text || '')}</s></div>`).join('')}</details>` : ''}
       ${AI.offerAmount ? `<div>Suggested offer: ${PP.esc(A.amount.currency_code)} ${PP.esc(AI.offerAmount)}</div>` : ''}
-      <small>${PP.esc(AI.provider)} · ${PP.esc(AI.model)} · ${AI.ms ?? '?'} ms · ${new Date(AI.generatedAt).toLocaleTimeString()}${AI.cached ? ' (cached for this dispute version)' : ''}</small>
+      <small>${PP.esc(AI.provider)} · ${PP.esc(AI.model)} · ${AI.ms ?? '?'} ms · ${new Date(AI.generatedAt).toLocaleTimeString()}${AI.cached ? ' (cached for this dispute version)' : ''}${AI.fallbackFrom ? ' · Groq backup: ' + PP.esc(AI.fallbackFrom) + ' hit its rate limit' : ''}</small>
       <p><button class="sec" id="askAi">Regenerate</button></p>`;
   }
   aiCard.innerHTML = body; wireDemo();

@@ -261,11 +261,12 @@ export function publicProposal(p) { const { tokenDigest: _d, ...rest } = p; retu
 const aiCache = new Map();
 export const heldWrites = new Map(); // proposal id -> { tool, execute, badAttempts } (server memory only; no code kept)
 const RATE_LIMIT = /\b429\b|RESOURCE_EXHAUSTED|quota|rate.?limit|too many requests/i;
-function labelRun(out, llm) {
+function labelRun(out, llm, extra = {}) {
   const live = out.available !== false && out.ok && out.recommendation?.source === 'llm';
   const liveError = out.available === false ? 'NOT_CONFIGURED' : !out.ok ? (RATE_LIMIT.test(String(out.error || '')) ? 'RATE_LIMITED' : 'MODEL_ERROR') : null;
-  out.run = { kind: live ? 'LIVE_MODEL' : 'RULES_FALLBACK', model: llm?.model || null, liveError,
-    note: live ? 'Live answer from the model, checked by ProofPilot.' : liveError === 'RATE_LIMITED' ? 'The live model is rate-limited (Gemini free tier: 20 requests per model per day). The rules engine decides; a recorded demo run can be shown, clearly marked as cached.'
+  out.run = { kind: live ? 'LIVE_MODEL' : 'RULES_FALLBACK', provider: out.provider || llm?.provider || null, model: out.model || llm?.model || null, liveError, ...extra,
+    note: live ? (extra.fallbackFrom ? `Live answer from the ${out.provider} backup (${extra.fallbackFrom} hit its rate limit), checked by ProofPilot.` : 'Live answer from the model, checked by ProofPilot.')
+      : liveError === 'RATE_LIMITED' ? `The live model hit its rate limit${extra.backupTried ? ` (the ${extra.backupTried} backup was tried and also failed)` : ''}. The rules engine decides; a recorded demo run can be shown, clearly marked as cached.`
       : liveError === 'NOT_CONFIGURED' ? 'No AI key on this server. The rules engine decides; a recorded demo run can be shown, clearly marked as cached.'
       : liveError ? 'The model call failed. The rules engine decides.' : 'The model answered, but its recommendation did not pass the checks, so the rules engine decides.' };
   if (liveError) out.cachedDemo = { available: true, path: '/api/demo/cached-agent-run' };
@@ -303,9 +304,17 @@ export async function aiAdvice({ api, store, engine, llm, agentTools, approvalCh
     store.data.agentRuns[id] = store.data.agentRuns[id].slice(0, 10);
     store.save?.();
   } else out = await adviseWithLlm(llm, ctx);
-  labelRun(out, llm);
-  if (out.ok) aiCache.set(key, out);
-  if (out.available) store.audit({ type: useAgent ? 'AGENT_RUN' : 'AI_ADVICE', disputeId: id, provider: out.provider, model: out.model, ok: out.ok,
+  // Gemini rate-limited + GROQ_API_KEY set: retry this run once on Groq (plain JSON advisor; no toolkit, no write
+  // tools, so nothing can be written). If Groq also fails, the rules engine decides as before.
+  let extra = {};
+  if (llm?.provider === 'gemini' && llm.backup && out.available !== false && !out.ok && RATE_LIMIT.test(String(out.error || ''))) {
+    const b = await adviseWithLlm(llm.backup, ctx);
+    if (b.ok) { b.fallbackFrom = 'gemini'; b.primaryError = out.error; out = b; extra = { fallbackFrom: 'gemini' }; }
+    else { out.backupTried = llm.backup.provider; out.backupError = b.error || null; extra = { backupTried: llm.backup.provider }; }
+  }
+  labelRun(out, llm, extra);
+  if (out.ok && !out.fallbackFrom) aiCache.set(key, out); // backup answers are not cached, so the next ask tries Gemini again
+  if (out.available) store.audit({ type: useAgent && !out.fallbackFrom ? 'AGENT_RUN' : 'AI_ADVICE', disputeId: id, provider: out.provider, model: out.model, ok: out.ok, fallbackFrom: out.fallbackFrom || null,
     action: out.recommendation?.action, tools: (out.agent?.activity || []).map(x => `${x.kind}:${x.tool}`),
     refused: (out.narrative?.refused?.length || 0) + (out.rationale?.refused?.length || 0) });
   return out.agent ? { ...out, agent: { ...out.agent, proposals: (out.agent.proposals || []).map(publicProposal) } } : out;

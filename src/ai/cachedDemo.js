@@ -1,4 +1,4 @@
-// Cached demo run (review v0.4, finding 4). The Gemini free tier allows 20 requests per model per day, so a hosted demo
+// Cached demo run (review v0.4, finding 4). The Gemini free tier has tight rate limits, so a hosted demo
 // can run out during judging. docs/demo/cached-agent-run.json is ONE real agent run recorded earlier on the sandbox
 // (redacted). It is served only as kind CACHED_DEMO, with its recording time, model and dispute id, and its proposals are
 // marked CACHED_NOT_APPROVABLE. ProofPilot never presents it as a live answer and never acts on it.

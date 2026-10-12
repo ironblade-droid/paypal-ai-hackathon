@@ -115,7 +115,7 @@ test('app: /ai route uses the configured provider; AI sentences are re-checked s
   const s = await new Promise(r => { const x = app.listen(0, () => r(x)); }); const base = `http://127.0.0.1:${s.address().port}`;
   const post = async (p, b) => (await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) })).json();
   const cfg = await (await fetch(base + '/api/config')).json();
-  assert.deepEqual(cfg.ai, { configured: true, provider: 'mock', model: 'mock-model', label: 'Mock (tests only)', agent: null });
+  assert.deepEqual(cfg.ai, { keySet: true, keysSet: ['mock'], provider: 'mock', model: 'mock-model', label: 'Mock (tests only)', backup: null, agent: null });
   const ai = await post('/api/disputes/PP-D-1/ai', {});
   assert.equal(ai.ok, true); assert.equal(ai.narrative.accepted[0].id, 'ai-1'); assert.equal(ai.narrative.accepted[0].text, 'The buyer paid USD 5.50.');
   const sub = (customClaims) => post('/api/disputes/PP-D-1/submit', { action: 'provide_evidence', evidenceType: 'PROOF_OF_FULFILLMENT', approved: true, confirm: 'APPROVE', packHash: 'x', customClaims });

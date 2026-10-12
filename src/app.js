@@ -42,9 +42,11 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
     : res.status(401).json({ error: 'PASSCODE_REQUIRED', message: config.writePasscode ? 'This demo host needs the reviewer passcode.' : 'Set PROOFPILOT_WRITE_PASSCODE to use ProofPilot from another machine.' });
   const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
 
-  const aiInfo = () => llm ? { configured: true, provider: llm.provider, model: llm.model, label: llm.label,
+  // keySet means a key is present, not that the model works: only a successful run (run.kind LIVE_MODEL) proves that.
+  const aiInfo = () => llm ? { keySet: true, keysSet: llm.keysSet || [llm.provider], provider: llm.provider, model: llm.model, label: llm.label,
+    backup: llm.backup ? { provider: llm.backup.provider, model: llm.backup.model, when: 'RATE_LIMITED' } : null,
     agent: llm.languageModel && agentTools ? { toolkit: `${TOOLKIT_NAME} ${TOOLKIT_VERSION}`, integration: 'Vercel AI SDK', readTools: READ_TOOLS, proposalOnlyTools: [...WRITE_TOOLS, 'propose_provide_evidence', 'propose_make_offer'] } : null }
-    : { configured: false, reason: 'No GEMINI_API_KEY or GROQ_API_KEY set' };
+    : { keySet: false, keysSet: [], reason: 'No GEMINI_API_KEY or GROQ_API_KEY set' };
   app.get('/favicon.ico', (_req, res) => res.status(204).end());
   app.get('/healthz', (_req, res) => res.json({ ok: true, sandbox: true, credentials: Boolean(api), dryRun: config.dryRun, engine: engine.name, ai: aiInfo() }));
   app.get('/api/config', (_req, res) => res.json({ clientId: config.clientId || null, environment: 'sandbox', credentials: Boolean(api), dryRun: config.dryRun,
