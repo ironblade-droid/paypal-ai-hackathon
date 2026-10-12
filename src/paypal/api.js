@@ -1,3 +1,4 @@
+const baseUrl = () => (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
 // Typed wrappers for the PayPal APIs ProofPilot uses: Orders v2, Payments v2, Shipment Tracking, Disputes v1, Webhooks.
 export function normaliseRel(rel) { return String(rel || '').replace(/-/g, '_'); }
 export function linkRels(obj) { return (obj?.links || []).map(l => normaliseRel(l.rel)); }
@@ -14,7 +15,8 @@ export function createApi(client) {
           amount: { currency_code: currency, value: total, breakdown: { item_total: { currency_code: currency, value: total } } },
           items,
         }],
-        payment_source: { paypal: { experience_context: { shipping_preference: 'GET_FROM_FILE', user_action: 'PAY_NOW', brand_name: 'ProofPilot Demo Shop (sandbox)' } } },
+        payment_source: { paypal: { experience_context: { shipping_preference: 'GET_FROM_FILE', user_action: 'PAY_NOW', brand_name: 'ProofPilot Demo Shop (sandbox)',
+          return_url: `${baseUrl()}/?checkout=return`, cancel_url: `${baseUrl()}/?checkout=cancel` } } },
       }, { Prefer: 'return=representation' });
     },
     captureOrder: (id) => client.post(`/v2/checkout/orders/${encodeURIComponent(id)}/capture`, {}, { Prefer: 'return=representation' }),
