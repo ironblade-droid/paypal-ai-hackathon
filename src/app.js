@@ -184,22 +184,38 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
     res.json({ before: describeStatus(d).label, after: describeStatus(fresh).label, note: 'Sandbox simulation of PayPal requesting evidence.' });
   }));
 
-  // ---------- Webhooks (SHOULD): verified with PayPal when PAYPAL_SANDBOX_WEBHOOK_ID is set
+  // ---------- Webhooks (SHOULD). With PAYPAL_SANDBOX_WEBHOOK_ID set, every event is checked with PayPal's
+  // POST /v1/notifications/verify-webhook-signature before ProofPilot keeps it:
+  //   - any of the five PAYPAL-* transmission headers missing -> 400 WEBHOOK_HEADERS_MISSING (PayPal is not called);
+  //   - PayPal answers FAILURE (or anything but SUCCESS)      -> 401 WEBHOOK_NOT_VERIFIED;
+  //   - the verify call itself fails (network, 5xx)            -> 502 WEBHOOK_VERIFY_UNAVAILABLE (PayPal retries later);
+  //   - webhook id set but no PayPal credentials               -> 503 (cannot verify, so nothing is accepted).
+  // Rejected events change nothing: they are not stored and trigger no PayPal read. A verified event is stored once
+  // (repeat deliveries of the same event id answer 200 duplicate) and a CUSTOMER.DISPUTE.* event triggers a read-only
+  // analysis of that dispute. Without a webhook id, events are logged labelled UNVERIFIED_NO_WEBHOOK_ID and nothing
+  // else happens (no analysis, no PayPal call).
+  const WEBHOOK_HEADERS = ['paypal-auth-algo', 'paypal-cert-url', 'paypal-transmission-id', 'paypal-transmission-sig', 'paypal-transmission-time'];
   app.post('/api/webhooks/paypal', wrap(async (req, res) => {
-    const evt = req.body || {};
+    const evt = req.body && typeof req.body === 'object' ? req.body : {};
     let verification = 'UNVERIFIED_NO_WEBHOOK_ID';
-    if (config.webhookId && api) {
+    if (config.webhookId) {
+      if (!api) return res.status(503).json({ error: 'WEBHOOK_CANNOT_VERIFY', message: 'PAYPAL_SANDBOX_WEBHOOK_ID is set but PayPal credentials are missing, so events cannot be verified.' });
+      const missing = WEBHOOK_HEADERS.filter(k => !req.get(k));
+      if (missing.length) { log('Webhook rejected: missing headers', missing.join(',')); return res.status(400).json({ error: 'WEBHOOK_HEADERS_MISSING', missing }); }
       const h = (k) => req.get(k);
-      const r = await api.verifyWebhook({ auth_algo: h('paypal-auth-algo'), cert_url: h('paypal-cert-url'), transmission_id: h('paypal-transmission-id'),
-        transmission_sig: h('paypal-transmission-sig'), transmission_time: h('paypal-transmission-time'), webhook_id: config.webhookId, webhook_event: evt }).catch(() => ({ verification_status: 'ERROR' }));
-      verification = r?.verification_status || 'ERROR';
-      if (verification !== 'SUCCESS') { store.addWebhook({ at: new Date().toISOString(), id: evt.id, type: evt.event_type, verification, accepted: false }); return res.status(400).json({ error: 'WEBHOOK_NOT_VERIFIED' }); }
+      let r;
+      try { r = await api.verifyWebhook({ auth_algo: h('paypal-auth-algo'), cert_url: h('paypal-cert-url'), transmission_id: h('paypal-transmission-id'),
+        transmission_sig: h('paypal-transmission-sig'), transmission_time: h('paypal-transmission-time'), webhook_id: config.webhookId, webhook_event: evt }); }
+      catch (e) { log('Webhook verify call failed', e?.issue || e?.message || ''); return res.status(502).json({ error: 'WEBHOOK_VERIFY_UNAVAILABLE' }); }
+      verification = r?.verification_status || 'UNKNOWN';
+      if (verification !== 'SUCCESS') { log('Webhook rejected: verification', verification); return res.status(401).json({ error: 'WEBHOOK_NOT_VERIFIED', verification }); }
+      if (evt.id && store.data.webhooks.some(w => w.id === evt.id && w.verification === 'SUCCESS')) return res.json({ received: true, verification, duplicate: true });
     }
     const resourceId = evt.resource?.dispute_id || evt.resource?.id;
-    const entry = store.addWebhook({ at: new Date().toISOString(), id: evt.id, type: evt.event_type, resourceId, verification, accepted: true });
+    const entry = store.addWebhook({ at: new Date().toISOString(), id: evt.id, type: evt.event_type, resourceId, verification, accepted: verification === 'SUCCESS' });
     res.json({ received: true, verification });
-    // Auto-analyse dispute events (read-only): status, deadline, requested evidence and the rules recommendation.
-    if (api && /^CUSTOMER\.DISPUTE\./.test(evt.event_type || '') && resourceId && (verification === 'SUCCESS' || !config.webhookId)) {
+    // Auto-analyse verified dispute events only (read-only): status, deadline, requested evidence, rules recommendation.
+    if (verification === 'SUCCESS' && /^CUSTOMER\.DISPUTE\./.test(evt.event_type || '') && resourceId) {
       analyseDispute({ api, store, engine }, resourceId)
         .then(a => { entry.analysis = { label: a.status.label, allowedTypes: a.allowedTypes, recommendation: a.recommendation.action, deadline: a.deadline?.due || null }; store.save(); })
         .catch(e => { entry.analysis = { error: e.issue || e.message }; store.save(); });

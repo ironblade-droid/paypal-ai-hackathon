@@ -15,7 +15,7 @@ ProofPilot checks an order for things that can void PayPal Seller Protection *be
 | `/seller` Orders & shipping | AG Grid of orders with a readiness score. Pre-ship check re-reads the order and capture from PayPal and flags: address redirect, missing shipping address, capture not completed, Seller Protection not eligible, USD 750+ without signature, digital goods. Blocking flags stop shipping unless you type an explicit override. Shipping adds tracking and reads the tracker back. | Orders v2 get, Payments v2 captures, Orders v2 `/track`, Shipment Tracking `/v1/shipping/trackers` |
 | `/disputes` Dispute queue | AG Grid **Community** (no Enterprise features, no licence key) of live disputes: plain-language status, response deadline, what PayPal asks for, which actions PayPal offers. Auto-refresh. | Disputes v1 list + get |
 | `/disputes/:id` Dispute detail | Reads what PayPal requests and the deadline. Offers **only the evidence types this dispute lists as requested** (never a fixed list). Builds a cited pack per type, shows gaps, shows a FIGHT / OFFER / ACCEPT / WAIT recommendation, then submits after you type APPROVE (evidence packs are also hash-bound). Shows the status before and after. New disputes show **Waiting for PayPal** and poll every 15 s (PayPal takes about 3 to 5 minutes to offer actions). | Disputes v1 `provide-evidence` (multipart + PDF), `provide-supporting-info`, `make-offer`, `accept-claim` |
-| `POST /api/webhooks/paypal` | Receives PayPal webhooks; verifies them with PayPal when `PAYPAL_SANDBOX_WEBHOOK_ID` is set, otherwise stores them marked unverified. | Webhooks verify-signature |
+| `POST /api/webhooks/paypal` | Receives PayPal webhooks. With `PAYPAL_SANDBOX_WEBHOOK_ID` set, each event is checked with PayPal's verify-webhook-signature API first: missing `PAYPAL-*` headers get 400 (PayPal not called), a non-SUCCESS answer 401, a failed verify call 502; rejected events are not stored and trigger nothing. A verified event is stored once (repeats get 200 duplicate) and a `CUSTOMER.DISPUTE.*` event triggers a read-only analysis of that dispute. Without the webhook id, events are only logged marked unverified (no analysis). Tested with a mocked PayPal (`test/webhook.test.js`). | Webhooks verify-signature |
 
 ### How submission is guarded
 1. The action must be one PayPal currently offers on the dispute (HATEOAS links).
@@ -97,7 +97,7 @@ npm start                                 # http://localhost:3000
 
 Optional env:
 - AI: `GEMINI_API_KEY` (+ `GEMINI_MODEL`), `GROQ_API_KEY` (+ `GROQ_MODEL`), `PROOFPILOT_LLM_PROVIDER=gemini|groq`.
-- `PAYPAL_SANDBOX_WEBHOOK_ID` (verify webhooks; dispute webhooks are then auto-analysed).
+- `PAYPAL_SANDBOX_WEBHOOK_ID` (verify webhooks; only verified dispute webhooks are auto-analysed, read-only; with the id set but no PayPal credentials, webhooks get 503).
 - `PROOFPILOT_DRY_RUN=1` (read-only, nothing is sent), `PROOFPILOT_WRITE_PASSCODE=...` (reviewer passcode. Required for everything that writes to PayPal, spends AI quota, or returns PayPal or agent data: dispute list and detail, agent runs, the cached demo run, orders, webhook log, risk checks. Approval codes never go over HTTP; they are printed in the server console. Without a passcode those routes only answer requests from the same machine, so a public host must set one. `/healthz`, `/api/config` and `/api/catalog` stay open and carry no PayPal case data).
 - `PROOFPILOT_ACCEPT_BELOW=10` (rules engine accept threshold), `PROOFPILOT_ENABLE_SANDBOX_TOOLS=1` (sandbox test helpers below), `PORT`.
 
