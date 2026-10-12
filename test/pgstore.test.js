@@ -112,3 +112,37 @@ test('fix 6: flushWithin returns within the limit when the database hangs', asyn
   const m = createPgMirror({ pool: { query: () => new Promise(() => {}) } });
   m.schedule({ a: 1 }); const t = Date.now(); await m.flushWithin(200); assert.ok(Date.now() - t < 1000);
 });
+
+test('load-first (a): a failed load never attaches the hook, so a later save cannot overwrite the database', async () => {
+  const pool = fakePool();
+  pool.rows.set('default', JSON.stringify({ orders: { O1: { id: 'O1', status: 'KEEP' } }, approvals: [], webhooks: [], audit: [] }));
+  const mirror = createPgMirror({ pool });
+  mirror.load = async () => { throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); };
+  const s = createStore(tmpFile());
+  await assert.rejects(attachPgMirror(s, mirror));
+  assert.equal(s.pgMirror, undefined);
+  s.audit({ type: 'AFTER_FAILED_LOAD' }); await mirror.flush();
+  assert.equal(JSON.parse(pool.rows.get('default')).orders.O1.status, 'KEEP');
+  assert.ok(!pool.calls.includes('INSERT'));
+});
+test('load-first (b): a save during the load writes nothing pre-merge to the database', async () => {
+  const pool = fakePool();
+  pool.rows.set('default', JSON.stringify({ orders: { O1: { id: 'O1', status: 'DB', updatedAt: '2026-01-01' } }, approvals: [], webhooks: [], audit: [] }));
+  const mirror = createPgMirror({ pool }); const realLoad = mirror.load; let release;
+  const writes = []; const q = pool.query.bind(pool);
+  pool.query = async (sql, p) => { if (/^INSERT/.test(sql.trim())) writes.push(JSON.parse(p[1])); return q(sql, p); };
+  mirror.load = async () => { await new Promise(r => { release = r; }); return realLoad(); };
+  const s = createStore(tmpFile());
+  const attaching = attachPgMirror(s, mirror);
+  s.upsertOrder('O2', { status: 'DURING_LOAD' }); await new Promise(r => setImmediate(r));
+  assert.equal(writes.length, 0);
+  release(); await attaching; await mirror.flush();
+  assert.ok(writes.length >= 1);
+  for (const w of writes) { assert.equal(w.orders.O1.status, 'DB'); assert.equal(w.orders.O2.status, 'DURING_LOAD'); }
+});
+test('mergeSaved: tie with no updatedAt keeps the local copy; webhooks trimmed to 200', () => {
+  const d = { orders: { A: { v: 'local' } }, webhooks: Array.from({ length: 150 }, (_, i) => ({ id: 'L' + i, at: '2026-02-' + String(i).padStart(3, '0') })) };
+  mergeSaved(d, { orders: { A: { v: 'db' } }, webhooks: Array.from({ length: 150 }, (_, i) => ({ id: 'D' + i, at: '2026-01-' + String(i).padStart(3, '0') })) });
+  assert.equal(d.orders.A.v, 'local');
+  assert.equal(d.webhooks.length, 200); assert.equal(d.webhooks[0].id, 'L149');
+});
