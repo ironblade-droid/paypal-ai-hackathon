@@ -81,7 +81,7 @@ export function createStore(file) {
     // Synchronous critical section for money writes: lock, reload ledger from disk, run fn, save, unlock.
     transaction(fn) { return withLock(() => { reload(); const r = fn(); if (file) writeAtomic(); return r; }); },
     upsertOrder(id, patch) { data.orders[id] = { ...(data.orders[id] || { id }), ...patch, updatedAt: new Date().toISOString() }; save(); return data.orders[id]; },
-    getOrder(id) { return data.orders[id]; },
+    getOrder(id) { return Object.hasOwn(data.orders, id) ? data.orders[id] : undefined; },
     listOrders() { return Object.values(data.orders).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))); },
     findOrderByCapture(captureId) { return Object.values(data.orders).find(o => o.captureId === captureId); },
     addApproval(a) { data.approvals.push(a); save(); return a; },

@@ -76,8 +76,14 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
 
   // Shop return panel: last order result from the local store only (no PayPal call). Order ids are unguessable; minimal fields.
   const shopResult = (o) => ({ id: o.id, status: o.status, captureId: o.captureId || null, captureStatus: o.captureStatus || null, risk: o.risk || null });
-  app.get('/api/orders/:id/result', (req, res) => { const o = store.getOrder(req.params.id);
-    return o ? res.json(shopResult(o)) : res.status(404).json({ error: 'NOT_FOUND' }); });
+  const ORDER_ID_RE = /^[A-Z0-9]{17}$/;
+  app.get('/api/orders/:id/result', (req, res) => {
+    const id = String(req.params.id || '');
+    if (!ORDER_ID_RE.test(id)) return res.status(404).json({ error: 'NOT_FOUND' });
+    const orders = store.data.orders;
+    const o = Object.hasOwn(orders, id) ? orders[id] : undefined;
+    return o ? res.json(shopResult(o)) : res.status(404).json({ error: 'NOT_FOUND' });
+  });
 
   app.get('/api/orders', guard, (_req, res) => res.json(store.listOrders()));
 
