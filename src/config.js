@@ -6,6 +6,7 @@ export function loadConfig(env = process.env) {
   return {
     clientId: env.PAYPAL_SANDBOX_CLIENT_ID || '',
     clientSecret: env.PAYPAL_SANDBOX_CLIENT_SECRET || '',
+    databaseUrl: env.DATABASE_URL || '',
     webhookId: env.PAYPAL_SANDBOX_WEBHOOK_ID || '',
     port: Number(env.PORT || 3000),
     dryRun: env.PROOFPILOT_DRY_RUN === '1',

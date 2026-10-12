@@ -26,3 +26,5 @@ services:
         sync: false
       - key: PROOFPILOT_DATA_FILE
         value: /tmp/proofpilot-store.json
+      - key: DATABASE_URL # optional: Neon / Render Postgres connection string; keeps history across restarts
+        sync: false

@@ -126,13 +126,28 @@ The API base is hard-wired to `https://api-m.sandbox.paypal.com`.
 
 ## Tests
 ```bash
-npm test               # unit + app + AI (mocked provider) tests. Never calls PayPal: the sandbox test is opt-in
+npm test               # includes mocked-Postgres store tests (test/pgstore.test.js); unit + app + AI (mocked provider) tests. Never calls PayPal: the sandbox test is opt-in
 npm run test:sandbox   # live sandbox (opt-in): token, list disputes, analyse PROOFPILOT_TEST_DISPUTE_ID (default PP-R-PGV-10190981), create one unapproved order
 npm run secret-scan    # gitleaks if installed, plus env-value and key-pattern grep
 ```
 
 ## Deploy (optional)
-`render.yaml` is a Render Blueprint. Set the sandbox env vars in the Render dashboard. The JSON store lives in `/tmp` there, so local seller data, **including ProofPilot's write ledger**, resets on every restart or redeploy; after that only refunds PayPal itself reports on the order limit new refunds. PayPal remains the source of truth. Run one instance (Render's single free instance); do not scale it out.
+`render.yaml` is a Render Blueprint. Set the sandbox env vars in the Render dashboard. Run one instance (Render's single free instance); do not scale it out. PayPal remains the source of truth.
+
+### Keeping history across restarts (optional `DATABASE_URL`)
+By default the JSON store lives in `/tmp` on Render, so local seller data (orders, proposals, agent runs, webhook log, audit log and **ProofPilot's write ledger**) resets on every restart or redeploy.
+
+Set `DATABASE_URL` to a Postgres connection string to keep it. Free options with no card: [Neon](https://neon.tech) free plan, or Render free Postgres (note: Render's free database expires after 30 days). Set it **only** in the Render dashboard (Environment), never in a file.
+- At startup ProofPilot creates one table, `proofpilot_store` (key, jsonb data), loads the saved document, then mirrors every save to it (one write at a time, the newest snapshot is kept; on SIGTERM the last write is flushed, waiting at most 5 s). On startup the database copy is merged in (the write ledger by entry, other records keeping the newer `updatedAt`), so an older copy cannot overwrite newer data. The server starts listening before the database connects (5 s connect timeout), so Render's health check passes even if the database host hangs.
+- TLS: the connection is encrypted but uses `rejectUnauthorized: false`, so the server certificate is **not verified**. That is acceptable for this sandbox demo only, not for real seller data.
+- The JSON file store still runs underneath, so behaviour is unchanged. If `DATABASE_URL` is unset, or the database cannot be reached at startup, ProofPilot logs that and uses the file store only. Database errors are logged by code only; the connection string is never logged.
+- Approval codes stay in their 0600 file and are not stored in the database.
+
+### Testing a real PayPal sandbox webhook on the hosted app
+1. Webhook URL: `https://<your-render-app>.onrender.com/api/webhooks/paypal`.
+2. In the PayPal developer dashboard, open the sandbox app ProofPilot uses, add a webhook with that URL, and subscribe to `CUSTOMER.DISPUTE.CREATED`, `CUSTOMER.DISPUTE.UPDATED`, `CUSTOMER.DISPUTE.RESOLVED` (optionally `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.REFUNDED`).
+3. Copy the webhook ID PayPal shows and set it as `PAYPAL_SANDBOX_WEBHOOK_ID` in Render (Environment), then redeploy. With it set, every event is verified with PayPal's verify-webhook-signature API; without it, events are logged as `UNVERIFIED_NO_WEBHOOK_ID` and ignored.
+4. Trigger a real event (e.g. open or update a dispute with the sandbox buyer, or act on an existing one) and check `GET /api/webhooks` (passcode) for an entry with `verification: SUCCESS`. The dashboard simulator sends events whose signatures may not verify against your webhook ID, so a real event is the proper test.
 
 ## Limits
 - Approval codes for agent writes are in a 0600 file on the server (masked in logs), so on a hosted demo only the host owner can approve agent writes. Evidence packs and the seller's own accept/offer still use the typed APPROVE confirmation on the page.
@@ -141,7 +156,7 @@ npm run secret-scan    # gitleaks if installed, plus env-value and key-pattern g
 - Requested evidence types ProofPilot cannot back with a PayPal record (for example a delivery signature) are shown as gaps and cannot be sent under that label. If PayPal refuses a type (`EVIDENCE_TYPE_IS_NOT_ALLOWED`), ProofPilot records it and stops recommending that type for the dispute.
 - Sandbox only. The sandbox does not settle cases on its own; ProofPilot never calls `adjudicate` and never claims a case outcome.
 - Seller Protection checks are a subset of PayPal's rules (address, signature threshold, capture state, eligibility PayPal reports, goods type).
-- Local data (orders created here, approvals, webhook log) is a JSON file in `data/` (git-ignored).
+- Local data (orders created here, approvals, webhook log) is a JSON file in `data/` (git-ignored), optionally mirrored to Postgres when `DATABASE_URL` is set.
 
 ## License
 MIT. See `LICENSE`.

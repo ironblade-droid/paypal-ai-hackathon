@@ -35,7 +35,7 @@ function readFile(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 // Ledger merge: union of entries by id; for the same id the later-updated copy wins.
-function mergeLedgers(mine = {}, disk = {}) {
+export function mergeLedgers(mine = {}, disk = {}) {
   const out = {};
   for (const id of new Set([...Object.keys(disk || {}), ...Object.keys(mine || {})])) {
     const byId = new Map();
@@ -54,6 +54,8 @@ export function createStore(file) {
   const initial = readFile(file); if (initial) Object.assign(data, initial);
   const lock = file ? `${file}.lock` : null;
   let depth = 0; // re-entrant inside transaction()
+  const persistHooks = []; // e.g. the optional Postgres mirror (src/lib/pgMirror.js)
+  const notify = () => { for (const h of persistHooks) h(); };
   const writeAtomic = () => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -73,13 +75,14 @@ export function createStore(file) {
     acquireLock(lock); depth++;
     try { return fn(); } finally { depth--; releaseLock(lock); }
   };
-  const save = () => { if (!file) return; withLock(() => { reload(); writeAtomic(); }); };
+  const save = () => { if (file) withLock(() => { reload(); writeAtomic(); }); notify(); };
   return {
     data,
     save,
     reload: () => withLock(reload),
     // Synchronous critical section for money writes: lock, reload ledger from disk, run fn, save, unlock.
-    transaction(fn) { return withLock(() => { reload(); const r = fn(); if (file) writeAtomic(); return r; }); },
+    transaction(fn) { const r = withLock(() => { reload(); const r = fn(); if (file) writeAtomic(); return r; }); notify(); return r; },
+    onPersist(fn) { persistHooks.push(fn); },
     upsertOrder(id, patch) { data.orders[id] = { ...(data.orders[id] || { id }), ...patch, updatedAt: new Date().toISOString() }; save(); return data.orders[id]; },
     getOrder(id) { return Object.hasOwn(data.orders, id) ? data.orders[id] : undefined; },
     listOrders() { return Object.values(data.orders).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))); },
