@@ -74,6 +74,11 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
     res.json({ id: order.id, status: order.status, captureId: cap?.id, captureStatus: cap?.status, risk: saved.risk });
   }));
 
+  // Shop return panel: last order result from the local store only (no PayPal call). Order ids are unguessable; minimal fields.
+  const shopResult = (o) => ({ id: o.id, status: o.status, captureId: o.captureId || null, captureStatus: o.captureStatus || null, risk: o.risk || null });
+  app.get('/api/orders/:id/result', (req, res) => { const o = store.getOrder(req.params.id);
+    return o ? res.json(shopResult(o)) : res.status(404).json({ error: 'NOT_FOUND' }); });
+
   app.get('/api/orders', guard, (_req, res) => res.json(store.listOrders()));
 
   // ---------- Pre-shipping risk check against live PayPal records

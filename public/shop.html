@@ -13,7 +13,25 @@
 <script>
 PP.nav('/');
 let selected = null;
+const LAST_KEY = 'proofpilot:lastOrderId';
+function showResult(r) {
+  const risk = r.risk || { flags: [], score: '-' };
+  const flags = (risk.flags || []).map(f => `<div class="sev-${PP.esc(f.severity)}">${PP.esc(f.severity)}: <span style="font-weight:400">${PP.esc(f.message)}</span></div>`).join('');
+  const el = document.getElementById('result'); el.classList.remove('muted');
+  el.innerHTML = `<div>Order <span class="chip">${PP.esc(r.id)}</span> ${PP.esc(r.status)}</div>
+    <div>Capture <span class="chip">${PP.esc(r.captureId || '-')}</span> ${PP.esc(r.captureStatus || '')}</div>
+    <h2 style="margin-top:10px">Pre-ship readiness: ${PP.esc(risk.score)}/100</h2>${flags}
+    <p><a href="/seller">Open in Orders & shipping →</a></p>`;
+}
+async function restoreResult() {
+  // The panel used to live only in page memory: any reload/redirect after capture (PayPal popup return, navigation) reset it to "No order yet".
+  const q = new URLSearchParams(location.search); let id = q.get('orderId') || q.get('token');
+  try { id = id || sessionStorage.getItem(LAST_KEY); } catch {}
+  if (!id) return;
+  try { showResult(await PP.api(`/api/orders/${encodeURIComponent(id)}/result`)); } catch {}
+}
 (async () => {
+  restoreResult();
   const cfg = await PP.configBanner(document.getElementById('cfg'));
   const products = await PP.api('/api/catalog');
   const box = document.getElementById('products');
@@ -30,11 +48,8 @@ let selected = null;
       return (await PP.api('/api/orders', { method: 'POST', body: { sku: selected, quantity: 1 } })).id; },
     onApprove: async (data) => {
       const r = await PP.api(`/api/orders/${data.orderID}/capture`, { method: 'POST' });
-      const flags = r.risk.flags.map(f => `<div class="sev-${f.severity}">${f.severity}: <span style="font-weight:400">${PP.esc(f.message)}</span></div>`).join('');
-      document.getElementById('result').innerHTML = `<div>Order <span class="chip">${r.id}</span> ${PP.esc(r.status)}</div>
-        <div>Capture <span class="chip">${PP.esc(r.captureId)}</span> ${PP.esc(r.captureStatus)}</div>
-        <h2 style="margin-top:10px">Pre-ship readiness: ${r.risk.score}/100</h2>${flags}
-        <p><a href="/seller">Open in Orders & shipping →</a></p>`;
+      try { sessionStorage.setItem(LAST_KEY, r.id || data.orderID); } catch {}
+      showResult(r);
     },
     onError: (err) => { document.getElementById('result').innerHTML = `<div class="banner err">${PP.esc(err.message || err)}</div>`; },
   }).render('#paypal-buttons');
