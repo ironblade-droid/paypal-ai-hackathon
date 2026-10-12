@@ -62,8 +62,12 @@ function renderAi() {
       <p><button class="sec" id="askAi">Regenerate</button></p>`;
   }
   aiCard.innerHTML = body; wireDemo();
-  if (window.askAi) askAi.onclick = async () => { askAi.disabled = true; askAi.textContent = 'Asking the model…';
+  if (window.askAi) askAi.onclick = async () => { const btn = askAi; btn.disabled = true; btn.textContent = 'Asking the model…';
+    const prog = document.createElement('div'); prog.id = 'aiProgress'; prog.className = 'banner info'; prog.setAttribute('role', 'status'); prog.setAttribute('aria-live', 'polite');
+    const t0 = Date.now(); const tick = () => { prog.textContent = `AI is reading the dispute through PayPal's toolkit… this can take up to a minute (${Math.floor((Date.now() - t0) / 1000)} s elapsed).`; };
+    tick(); btn.insertAdjacentElement('afterend', prog); const timer = setInterval(tick, 1000);
     try { AI = await PP.api(`/api/disputes/${encodeURIComponent(id)}/ai`, { method: 'POST', body: { refresh: Boolean(AI) } }); } catch (e) { AI = { ok: false, error: e.message }; }
+    finally { clearInterval(timer); prog.remove(); }
     renderAi(); renderApprove(); loadAgent(); };
   document.querySelectorAll('.aiPick').forEach(x => x.onchange = renderApprove);
 }
@@ -185,7 +189,7 @@ function renderAgent() {
       ${(p.blockedReasons || []).length ? `<div>Why: ${PP.esc(p.blockedReasons.map(r => PP.h('binding', r)).join('; '))}</div>` : ''}
       ${p.canonical ? `<details><summary>Exactly what would be sent</summary><pre>${PP.esc(JSON.stringify(p.canonical, null, 2))}</pre><small>Proposal hash ${PP.esc(String(p.hash || '').slice(0, 16))}</small></details>` : ''}
       ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && p.liveCode ? `<div>To run this on PayPal, type the approval code for proposal <code>${PP.esc(p.id)}</code>. It is printed only in the ProofPilot server console (the terminal running <code>npm start</code>, or your host's private log), never sent to this page or the API. Single use, expires ${new Date(p.tokenExpiresAt).toLocaleTimeString()}.<br><input size="22" id="pc-${p.id}" placeholder="APPROVE-XXXXX-XXXXX" autocomplete="off"> <button class="sec" data-approve="${p.id}">Approve and run</button> <button class="sec" data-dismiss="${p.id}">Dismiss</button></div>` : ''}
-      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && !p.liveCode ? '<div class="muted">No live approval code (the server restarted or the code was used). Ask the agent again.</div>' : ''}
+      ${p.status === 'PENDING_SELLER_APPROVAL' && p.executable && !p.liveCode ? `<div class="muted">No live approval code (the server restarted or the code was used). Ask the agent again. <button class="sec" data-dismiss="${PP.esc(p.id)}">Dismiss</button></div>` : ''}
       ${p.status === 'PENDING_SELLER_APPROVAL' && p.kind === 'evidence' && p.canonical?.evidence_type ? `<div><button class="sec" data-usepack="${PP.esc(p.canonical.evidence_type)}">Open in evidence pack</button> (sent only through Approve and submit below)</div>` : ''}
     </div>`).join('') : '<div class="muted">The agent proposed no write action.</div>');
   agentCard.innerHTML = h;
