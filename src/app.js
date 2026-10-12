@@ -13,6 +13,7 @@ import { TOOLKIT_NAME, TOOLKIT_VERSION, READ_TOOLS, WRITE_TOOLS } from './ai/age
 import { LABELS } from './engine/labels.js';
 import { PayPalError } from './paypal/client.js';
 import { redact, log } from './lib/redact.js';
+import { checkAmountWithin } from './lib/money.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pub = path.join(here, '..', 'public');
@@ -165,9 +166,17 @@ export function createApp({ api, store, engine, config, llm = null, agentTools =
   // Sandbox-only helper to open a fresh test dispute as the sandbox buyer (needs buyer consent; off by default).
   app.post('/api/sandbox/disputes', needApi, guard, wrap(async (req, res) => {
     if (process.env.PROOFPILOT_ENABLE_SANDBOX_TOOLS !== '1') return res.status(403).json({ error: 'SANDBOX_TOOLS_DISABLED', message: 'Set PROOFPILOT_ENABLE_SANDBOX_TOOLS=1 to enable.' });
-    const { buyerEmail, buyerTransactionId, amount } = req.body || {};
+    const { buyerEmail, buyerTransactionId, amount, captureId } = req.body || {};
     if (!buyerEmail || !buyerTransactionId) return res.status(400).json({ error: 'MISSING_FIELDS' });
-    const d = await api.createSandboxDispute({ buyerEmail, buyerTransactionId, amount: amount || { currency_code: 'USD', value: '5.50' }, clientId: config.clientId });
+    // The disputed amount is never defaulted (v0.5.1 fix: a hard-coded USD 5.50 default opened a 5.50 partial dispute on an
+    // USD 18.00 payment). It is the captured amount of captureId, or an explicit amount no larger than that capture.
+    let cap = null;
+    if (captureId) cap = await api.getCapture(String(captureId));
+    const want = amount || cap?.amount;
+    if (!want) return res.status(400).json({ error: 'AMOUNT_REQUIRED', message: 'Send captureId (the dispute is for the full captured amount) or an explicit amount.' });
+    const c = checkAmountWithin({ value: want.value, currency_code: want.currency_code }, { currency: cap?.amount?.currency_code || want.currency_code, max: cap?.amount?.value || '999999999' });
+    if (!c.ok) return res.status(400).json({ error: 'BAD_AMOUNT', reason: c.reason });
+    const d = await api.createSandboxDispute({ buyerEmail, buyerTransactionId, amount: { currency_code: c.currency_code, value: c.value }, clientId: config.clientId });
     const id = d?.dispute_id || (d?.links || []).map(l => l.href).find(h => h.includes('/disputes/'))?.split('/').pop();
     store.audit({ type: 'SANDBOX_DISPUTE_CREATED', disputeId: id });
     res.status(201).json({ id, note: 'New disputes usually take 3 to 5 minutes before PayPal offers seller actions.' });

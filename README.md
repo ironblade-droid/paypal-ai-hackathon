@@ -113,7 +113,7 @@ The API base is hard-wired to `https://api-m.sandbox.paypal.com`.
 **B. Fresh dispute.**
 1. Buy the USD 5.50 sticker pack on `/` with a sandbox personal account.
 2. On `/seller`, select the order, run the pre-ship check, add tracking.
-3. Open a dispute as the buyer: either in the sandbox buyer's Resolution Center, or with `POST /api/sandbox/disputes {buyerEmail, buyerTransactionId}` (needs `PROOFPILOT_ENABLE_SANDBOX_TOOLS=1`, the buyer's one-time *Log in with PayPal* consent for the app, and the **buyer-side** transaction id from the buyer's Activity page). Each transaction can only have one dispute.
+3. Open a dispute as the buyer: either in the sandbox buyer's Resolution Center, or with `POST /api/sandbox/disputes {buyerEmail, buyerTransactionId, captureId}` (the dispute is for the full captured amount; an explicit `amount` up to the capture is also accepted, and there is no default) (needs `PROOFPILOT_ENABLE_SANDBOX_TOOLS=1`, the buyer's one-time *Log in with PayPal* consent for the app, and the **buyer-side** transaction id from the buyer's Activity page). Each transaction can only have one dispute.
 4. Open the dispute: it shows **Waiting for PayPal** and polls until actions appear (about 3 to 5 minutes).
 5. Review the cited pack (buyer-entered fields are shown quoted and unticked), type APPROVE, submit. For an agent proposal, type the approval code from the server terminal or the code file whose path the console prints. The page shows the status change, for example *Your response needed → Under PayPal review*.
 

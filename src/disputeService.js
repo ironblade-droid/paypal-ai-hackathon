@@ -36,7 +36,10 @@ export async function analyseDispute({ api, store, engine }, id) {
   const refusalRisks = derivedRefusalRisks(dispute);
   const recommendation = engine.recommend({ dispute, allowedTypes, packs, acceptBelow: engine.acceptBelow || 0, rejectedTypes: [...new Set(paypalRejected.map(r => r.type))] });
   const txn = dispute.disputed_transactions?.[0] || {};
-  return {
+  // At stake = PayPal's dispute_amount. The payment can be larger (a partial dispute); both are shown so they are not confused.
+  const paymentAmount = recs.capture?.amount || txn.gross_amount || null;
+  const partial = Boolean(paymentAmount && dispute.dispute_amount && (paymentAmount.value !== dispute.dispute_amount.value || paymentAmount.currency_code !== dispute.dispute_amount.currency_code));
+  return { paymentAmount, partialDispute: partial,
     id: dispute.dispute_id, reason: dispute.reason, amount: dispute.dispute_amount, stage: dispute.dispute_life_cycle_stage,
     paypalStatus: dispute.status, state: dispute.dispute_state, createTime: dispute.create_time, updateTime: dispute.update_time,
     status, sandboxLinks: sandboxSimLinks(dispute), deadline: deadline(dispute), allowedTypes, packs, supporting, recommendation,

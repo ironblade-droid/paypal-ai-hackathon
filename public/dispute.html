@@ -71,7 +71,7 @@ function renderAi() {
 function render() {
   const s = A.status; const dl = A.deadline;
   head.innerHTML = `<h1>${PP.esc(A.id)} ${PP.badge(s.label, s.tone)}</h1>
-    <div><b>${PP.hc('reason', A.reason)}</b> · <b>${PP.esc(A.amount.currency_code)} ${PP.esc(A.amount.value)}</b> at stake · ${PP.hc('stage', A.stage)}</div>
+    <div><b>${PP.hc('reason', A.reason)}</b> · <b>${PP.esc(A.amount.currency_code)} ${PP.esc(A.amount.value)}</b> at stake${A.partialDispute ? ` (partial dispute: the payment was ${PP.esc(A.paymentAmount.currency_code)} ${PP.esc(A.paymentAmount.value)}; PayPal lists ${PP.esc(A.amount.currency_code)} ${PP.esc(A.amount.value)} as disputed)` : ''} · ${PP.hc('stage', A.stage)}</div>
     <div>${dl ? `Respond by <b>${new Date(dl.due).toLocaleString()}</b> (${dl.overdue ? '<span class="sev-BLOCK">overdue</span>' : `${dl.hoursLeft} h left`})` : '<span class="muted">No seller response deadline set by PayPal right now.</span>'}</div>
     <small title="PayPal code: ${PP.esc(A.paypalStatus)}">${PP.esc(s.detail || '')}</small>`;
   waiting.innerHTML = s.waiting ? `<div class="banner wait">⏳ <b>Waiting for PayPal.</b> ${PP.esc(s.detail)} Last checked ${new Date().toLocaleTimeString()}.</div>` : '';
