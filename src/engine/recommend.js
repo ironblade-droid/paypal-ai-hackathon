@@ -30,7 +30,9 @@ export const rulesEngine = {
       return { ...base, action: 'WAIT', reasons };
     }
     if (dispute?.status === 'UNDER_REVIEW' && !can('provide_evidence')) {
-      const reasons = ['Under PayPal review: your evidence is with PayPal and no evidence request is open.',
+      const sent = (dispute?.evidences || []).some(e => e?.source === 'SUBMITTED_BY_SELLER');
+      const reasons = [sent ? 'Under PayPal review: your evidence is with PayPal and no evidence request is open.'
+        : 'Under PayPal review: no evidence from you is on this case, and PayPal has not opened an evidence request.',
         'Accepting now would refund the buyer while PayPal is still reviewing, so ProofPilot does not recommend it.'];
       if (can('provide_supporting_info')) reasons.push('You can add supporting information if you have new records.');
       return { ...base, action: 'WAIT', reasons };

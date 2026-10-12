@@ -184,12 +184,15 @@ test('F3: no JSON response carries the approval code or its digest; the code goe
   } finally { s.close(); }
 });
 
-test('F3: the default channel prints the code to the server console only', () => {
+test('F3: the default channel tells the server console about the code, masked', () => {
+  process.env.PROOFPILOT_APPROVAL_CODE_DIR ||= fs.mkdtempSync('/tmp/pp-codes-');
   const orig = process.stdout.write.bind(process.stdout); let out = '';
   process.stdout.write = (c) => { out += c; return true; };
   try { consoleApprovalChannel({ proposalId: 'prop-1', disputeId: 'PP-D-1', description: 'Accept the claim', code: 'APPROVE-ABCDE-FGHJK', expiresAt: 'x' }); }
   finally { process.stdout.write = orig; }
-  assert.match(out, /Approval code for proposal prop-1 on dispute PP-D-1/); assert.match(out, /APPROVE-ABCDE-FGHJK/);
+  assert.match(out, /Approval code for proposal prop-1 on dispute PP-D-1/);
+  // v0.5.1: stdout carries only the masked code and the 0600 file path (see v051.test.js for the file itself).
+  assert.ok(!out.includes('APPROVE-ABCDE-FGHJK')); assert.match(out, /APPROVE-\*{5}-\*GHJK/);
 });
 
 test('F3: committed logs carry no merchant id; future agent logs redact it', () => {

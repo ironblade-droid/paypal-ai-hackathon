@@ -113,7 +113,7 @@ test('refund that matches the dispute HOLD_PLACED movement is a PayPal dispute h
   const d = dispute({ fund_movements: [{ party: 'RECEIVER', amount: { currency_code: 'USD', value: '4.82' }, initiated_time: '2026-10-11T09:25:32.000Z', type: 'DEBIT', reason: 'HOLD_PLACED' }] });
   assert.equal(classifyRefund(hold, d).kind, 'DISPUTE_HOLD');
   assert.equal(classifyRefund({ ...hold, status: 'COMPLETED' }, dispute()).kind, 'SELLER_REFUND');
-  assert.equal(classifyRefund(hold, dispute()).kind, 'PENDING_REVERSAL');
+  assert.equal(classifyRefund(hold, dispute()).kind, 'SELLER_REFUND_PENDING'); // v0.5.1: a pending non-hold refund is money out
   const ord = { ...order, purchase_units: [{ ...order.purchase_units[0], payments: { captures: [capture], refunds: [hold] } }] };
   const r = reg(); r.add('refund', hold.id, { ...hold, proofpilot_classification: 'DISPUTE_HOLD' });
   const p = buildPack('PROOF_OF_REFUND', { dispute: d, capture, order: ord, trackers: [], registry: r });

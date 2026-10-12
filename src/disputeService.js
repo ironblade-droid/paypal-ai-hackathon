@@ -1,10 +1,14 @@
 // Dispute analysis: live PayPal reads -> status, deadline, allowed evidence types, cited packs, recommendation.
+import crypto from 'node:crypto';
 import { adviseWithLlm } from './ai/advisor.js';
 import { runAgent } from './ai/agent.js';
 import { allowedEvidenceTypes, gatherRecords, buildPack, validateClaims, packHash, toEvidencePayload, packPdf, meetsRequirement } from './engine/evidence.js';
 import { bindProposal, proposalHash, issueToken, tokenDigest, TEMPLATES } from './ai/proposals.js';
 import { checkAmountWithin, parseAmount } from './lib/money.js';
 import { refusalsFor, derivedRefusalRisks } from './lib/refusals.js';
+import { human } from './engine/labels.js';
+import { redact } from './lib/redact.js';
+import { removeApprovalCodeFile, deliverApprovalCode } from './lib/approvalCodes.js';
 import { describeStatus, deadline, sellerActions, sandboxSimLinks } from './engine/status.js';
 
 export async function analyseDispute({ api, store, engine }, id) {
@@ -109,13 +113,25 @@ export async function submitDecision({ api, store, engine, config }, id, body) {
   const approval = store.addApproval({ at: new Date().toISOString(), disputeId: id, action, evidenceType: body.evidenceType, packHash: body.packHash, dryRun: config.dryRun });
   if (config.dryRun) return { dryRun: true, before, after: before, payloadPreview, approval };
   if (manualKind) { if (writesInFlight.has(id)) throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'Another write on this dispute is running.', { reasons: ['WRITE_IN_PROGRESS'] });
-    writesInFlight.add(id); recordWrite(store, id, { source: 'seller-manual', action, kind: manualKind, amount: manualKind === 'accept' ? a.amount : payloadPreview.amount }); }
+    writesInFlight.add(id); }
+  let manualEntry = null;
+  if (manualKind) {
+    // Cross-process: re-check and record under the store lock after re-reading the ledger from disk (review v0.5 a).
+    const again = (store.transaction || ((f) => f()))(() => {
+      const r = writeBlockers(store, id, { kind: manualKind, disputedValue: a.amount?.value, registry: a._ctx.recs.registry, countPending: false })
+        .filter(x => x !== 'WRITE_IN_PROGRESS' && (x !== 'DISPUTE_ALREADY_HAS_A_WRITE' || writeLedger(store, id).some(w => !w.dryRun && !w.failed && w.kind !== 'offer')));
+      if (r.length) return r;
+      manualEntry = { id: 'w-' + crypto.randomUUID().slice(0, 12), at: new Date().toISOString(), disputeId: id, captureId: a.transaction?.sellerTxn || null, source: 'seller-manual', action, kind: manualKind,
+        amount: manualKind === 'accept' ? a.amount : payloadPreview.amount };
+      writeLedger(store, id).push(manualEntry); return [];
+    });
+    if (again.length) { writesInFlight.delete(id); throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'ProofPilot already sent a refund or accept on this dispute (or one is running), or this would exceed the disputed amount.', { reasons: again }); }
+  }
   try { return await sendDecision({ api, store, config }, { id, a, action, body, before, call, payloadPreview, approval }); }
   catch (e) {
     // PayPal refused it (4xx with an issue code): nothing happened, so the ledger entry does not count. Anything else
     // (timeout, 5xx) stays counted: fail closed.
-    const last = manualKind ? writeLedger(store, id).at(-1) : null;
-    if (last && e?.issue && e.status >= 400 && e.status < 500) { last.failed = true; last.failure = e.issue; store.save?.(); }
+    if (manualEntry && e?.issue && e.status >= 400 && e.status < 500) updateWrite(store, manualEntry.id, { failed: true, failure: e.issue });
     throw e;
   }
   finally { if (manualKind) writesInFlight.delete(id); }
@@ -147,42 +163,83 @@ async function sendDecision({ api, store }, { id, a, action, body, before, call,
 const writesInFlight = new Set();
 const cents = (v) => parseAmount(String(v ?? ''))?.cents ?? null;
 export function writeLedger(store, disputeId) { store.data.disputeWrites ||= {}; return (store.data.disputeWrites[disputeId] ||= []); }
-function recordWrite(store, disputeId, entry) { writeLedger(store, disputeId).push({ at: new Date().toISOString(), ...entry }); store.save?.(); }
+const allLedgerEntries = (store) => Object.values(store.data.disputeWrites || {}).flat();
+function recordWrite(store, disputeId, entry) {
+  const w = { id: 'w-' + crypto.randomUUID().slice(0, 12), at: new Date().toISOString(), disputeId, ...entry };
+  writeLedger(store, disputeId).push(w); store.save?.(); return w;
+}
+// Find a ledger entry by id (after a reload the arrays may be new objects) and patch it.
+function updateWrite(store, id, patch) {
+  const w = allLedgerEntries(store).find(x => x.id === id); if (!w) return null;
+  Object.assign(w, patch, { updatedAt: new Date().toISOString() }); store.save?.(); return w;
+}
 const proposalsFor = (store, disputeId) => (store.data.agentRuns?.[disputeId] || []).flatMap(r => r.proposals || []);
 function isLive(p) {
   if (p.status !== 'PENDING_SELLER_APPROVAL' || !p.executable || !heldWrites.has(p.id)) return false;
   return !(p.tokenExpiresAt && Date.parse(p.tokenExpiresAt) < Date.now());
 }
-// Money already returned to the buyer on this dispute: the larger of ProofPilot's executed refunds/accepts and the
-// completed seller refunds PayPal reports on the order (one refund can appear in both, so they are not added up).
-export function refundedSoFar(store, disputeId, registry = null) {
-  const ledger = writeLedger(store, disputeId).filter(w => !w.dryRun && !w.failed && (w.kind === 'refund' || w.kind === 'accept')).reduce((n, w) => n + (cents(w.amount?.value) || 0), 0);
-  const paypal = (registry?.all?.() || []).filter(r => r.type === 'refund' && r.data?.proofpilot_classification === 'SELLER_REFUND').reduce((n, r) => n + (cents(r.data.amount?.value) || 0), 0);
-  return Math.max(ledger, paypal);
+const counts = (w, exceptEntryId) => !w.dryRun && !w.failed && w.id !== exceptEntryId && (w.kind === 'refund' || w.kind === 'accept');
+// Refund records PayPal reports on the order that are money going back to the buyer: completed AND pending seller
+// refunds (review v0.5 b). PayPal's dispute hold is not a refund and is never counted.
+const PAYPAL_MONEY_OUT = new Set(['SELLER_REFUND', 'SELLER_REFUND_PENDING']);
+function paypalRefunded(registry) {
+  return (registry?.all?.() || []).filter(r => r.type === 'refund' && PAYPAL_MONEY_OUT.has(r.data?.proofpilot_classification)).reduce((n, r) => n + (cents(r.data.amount?.value) || 0), 0);
+}
+const captureOf = (registry) => (registry?.all?.() || []).find(r => r.type === 'capture') || null;
+// Money already returned to the buyer, per PAYMENT (capture), not per dispute (review v0.5 b): every ProofPilot
+// refund/accept recorded against this capture on ANY dispute, or the refunds PayPal reports on the order, whichever is
+// larger (one refund can appear in both, so they are not added up). Without a known capture id it falls back to this
+// dispute's own ledger.
+export function refundedSoFar(store, disputeId, registry = null, { captureId = null, exceptEntryId = null } = {}) {
+  const cap = captureId || captureOf(registry)?.id || null;
+  const ledger = allLedgerEntries(store).filter(w => counts(w, exceptEntryId) && (w.disputeId === disputeId || (cap && w.captureId === cap)));
+  const own = writeLedger(store, disputeId).filter(w => counts(w, exceptEntryId) && !ledger.includes(w));
+  const fromLedger = [...ledger, ...own].reduce((n, w) => n + (cents(w.amount?.value) || 0), 0);
+  return Math.max(fromLedger, paypalRefunded(registry));
 }
 const KIND = { create_refund: 'refund', accept_dispute_claim: 'accept', propose_make_offer: 'offer' };
 function moneyOut(kind, amountValue, disputedValue) { return kind === 'refund' ? (cents(amountValue) ?? Infinity) : kind === 'accept' ? (cents(disputedValue) ?? Infinity) : 0; }
-// Reasons a new write on this dispute must not go ahead. exceptId: the proposal being approved itself.
-export function writeBlockers(store, disputeId, { kind, amountValue, disputedValue, registry = null, exceptId = null, countPending = true }) {
+// Reasons a new write on this dispute must not go ahead. exceptId: the proposal being approved itself; exceptEntryId:
+// its own ledger reservation. The cap is the disputed amount AND, when known, the captured amount of the payment.
+export function writeBlockers(store, disputeId, { kind, amountValue, disputedValue, registry = null, captureId = null, captureValue = null, exceptId = null, exceptEntryId = null, countPending = true }) {
   const reasons = [];
-  const executed = writeLedger(store, disputeId).filter(w => !w.dryRun && !w.failed);
+  const executed = writeLedger(store, disputeId).filter(w => !w.dryRun && !w.failed && w.id !== exceptEntryId);
   if (executed.length) reasons.push('DISPUTE_ALREADY_HAS_A_WRITE');
   if (countPending && proposalsFor(store, disputeId).some(p => p.id !== exceptId && isLive(p))) reasons.push('ANOTHER_PROPOSAL_PENDING');
   if (writesInFlight.has(disputeId)) reasons.push('WRITE_IN_PROGRESS');
-  const max = cents(disputedValue);
+  const capRec = captureOf(registry);
+  const disputedMax = cents(disputedValue);
+  const captureMax = cents(captureValue ?? capRec?.data?.amount?.value);
+  const max = captureMax != null && disputedMax != null ? Math.min(disputedMax, captureMax) : disputedMax;
   if (kind === 'refund' || kind === 'accept') {
-    if (max == null || refundedSoFar(store, disputeId, registry) + moneyOut(kind, amountValue, disputedValue) > max) reasons.push('REFUNDS_WOULD_EXCEED_DISPUTED');
+    const done = refundedSoFar(store, disputeId, registry, { captureId: captureId || capRec?.id, exceptEntryId });
+    if (max == null || done + moneyOut(kind, amountValue, disputedValue) > max) reasons.push('REFUNDS_WOULD_EXCEED_DISPUTED');
   }
   return reasons;
+}
+// Did PayPal refuse the write (nothing happened) or is the outcome unknown? The Agent Toolkit does not throw: it returns
+// a JSON string, either the result or an error object ({ code: 'PAYPAL_API_HTTP_ERROR', status } or { error: {...} }).
+export function classifyWriteOutcome(resultOrError, thrown = false) {
+  let v = resultOrError;
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch { /* plain text */ } }
+  const status = Number(v?.status ?? v?.statusCode ?? v?.error?.status ?? NaN);
+  const code = v?.code || v?.issue || v?.error?.code || v?.error?.type || null;
+  const message = String(v?.message || v?.error?.message || v?.details?.[0]?.description || (thrown ? (resultOrError?.message || resultOrError) : '') || '').replace(/\s+/g, ' ').slice(0, 300);
+  const isError = thrown || Boolean(v?.error) || code === 'PAYPAL_API_HTTP_ERROR' || code === 'PAYPAL_API_NO_RESPONSE' || code === 'PAYPAL_API_SETUP_ERROR' || (Number.isFinite(status) && status >= 400);
+  if (!isError) return { ok: true };
+  if (Number.isFinite(status) && status >= 400 && status < 500) return { ok: false, rejected: true, status, code, message };
+  if (code === 'PAYPAL_API_SETUP_ERROR' || (v?.error?.type === 'paypal_error' && !Number.isFinite(status))) return { ok: false, rejected: true, status: null, code, message };
+  return { ok: false, rejected: false, status: Number.isFinite(status) ? status : null, code, message }; // timeout, 5xx, no response: unknown
 }
 
 // ---------- Approval-code delivery (review v0.4, finding 3)
 // The code is never put in any HTTP response. It goes to a human-only channel: by default the server console (the
 // terminal running `npm start`, or the host's private log stream). A script holding only the reviewer passcode can list
 // and approve proposals over the API, but it cannot read the code.
-export function consoleApprovalChannel({ proposalId, disputeId, description, code, expiresAt }) {
-  process.stdout.write(`\n[ProofPilot] Approval code for proposal ${proposalId} on dispute ${disputeId}\n  ${description}\n  Code: ${code}  (single use, expires ${expiresAt}; type it on the dispute page to approve; never sent over the API)\n\n`);
-}
+// v0.5.1 (review e): the full code is never written to stdout or a log. It goes to a 0600 file outside the repo
+// (src/lib/approvalCodes.js); the console shows only the masked code, its last 4 characters and the file path, plus the
+// full code once on an interactive terminal (stderr TTY) for the local operator.
+export function consoleApprovalChannel(info) { return deliverApprovalCode(info); }
 // What clients may see of a proposal: never the code, never its digest.
 export function publicProposal(p) { const { tokenDigest: _d, ...rest } = p; return rest; }
 
@@ -223,7 +280,7 @@ export async function aiAdvice({ api, store, engine, llm, agentTools, approvalCh
     // human-only approval channel and is not kept anywhere on the server.
     for (const p of props) {
       if (p.status !== 'PENDING_SELLER_APPROVAL' || !p.executable) continue;
-      const blockers = writeBlockers(store, id, { kind: KIND[p.tool], amountValue: p.canonical?.amount?.value, disputedValue: a.amount?.value, registry: a._ctx.recs.registry });
+      const blockers = writeBlockers(store, id, { kind: KIND[p.tool], amountValue: p.canonical?.amount?.value, disputedValue: a.amount?.value, registry: a._ctx.recs.registry, captureId: p.bound?.captureId });
       if (blockers.length) { p.status = 'BLOCKED'; p.blockedReasons = blockers; continue; }
       const t = issueToken(p);
       p.tokenDigest = t.digest; p.tokenExpiresAt = t.expiresAt; p.approvalCodeDelivery = 'SERVER_CONSOLE';
@@ -261,25 +318,43 @@ export async function approveProposal({ api, store, engine, config }, proposalId
   const h = heldWrites.get(p.id);
   if (!h || !p.tokenDigest) throw new SubmitError('PROPOSAL_EXPIRED', 'This proposal has no live approval code (server restarted or already used). Ask the agent again.');
   if (proposalHash(p) !== p.hash) throw new SubmitError('PROPOSAL_CHANGED', 'The stored proposal no longer matches its hash.');
-  if (new Date(p.tokenExpiresAt).getTime() < Date.now()) { heldWrites.delete(p.id); p.status = 'EXPIRED'; store.save?.(); throw new SubmitError('PROPOSAL_EXPIRED', 'The approval code expired. Ask the agent again.'); }
+  if (new Date(p.tokenExpiresAt).getTime() < Date.now()) { heldWrites.delete(p.id); removeApprovalCodeFile(p.id); p.status = 'EXPIRED'; store.save?.(); throw new SubmitError('PROPOSAL_EXPIRED', 'The approval code expired. Ask the agent again.'); }
   if (typeof body.token !== 'string' || tokenDigest(body.token.trim(), p) !== p.tokenDigest) {
-    if (++h.badAttempts >= 5) { heldWrites.delete(p.id); p.status = 'VOIDED'; store.save?.(); }
+    if (++h.badAttempts >= 5) { heldWrites.delete(p.id); removeApprovalCodeFile(p.id); p.status = 'VOIDED'; store.save?.(); }
     store.audit({ type: 'AGENT_PROPOSAL_BAD_TOKEN', proposalId: p.id });
     throw new SubmitError('BAD_TOKEN', 'The approval code does not match this proposal.');
   }
   heldWrites.delete(p.id); // single use: consumed now, whatever happens next
-  // One write per dispute, checked synchronously before any await; the dispute is then locked until this approval ends.
+  removeApprovalCodeFile(p.id);
+  // One write per dispute, checked synchronously before any await. Cross-process (review v0.5 a): inside a store
+  // transaction (lock file + re-read of the ledger from disk) the check and a ledger RESERVATION happen together, so a
+  // second process sharing the file sees this reservation before it can reserve its own. Dry runs reserve nothing.
   const kind = KIND[p.tool];
-  const pre = writeBlockers(store, p.disputeId, { kind, amountValue: p.canonical?.amount?.value, disputedValue: p.bound?.disputedAmount?.value, exceptId: p.id });
+  let reservation = null;
+  const pre = store.transaction ? store.transaction(() => {
+    const r = writeBlockers(store, p.disputeId, { kind, amountValue: p.canonical?.amount?.value, disputedValue: p.bound?.disputedAmount?.value, captureId: p.bound?.captureId, exceptId: p.id });
+    if (!r.length && !config.dryRun) {
+      const w = { id: 'w-' + crypto.randomUUID().slice(0, 12), at: new Date().toISOString(), disputeId: p.disputeId, captureId: p.bound?.captureId || null, source: 'agent-proposal',
+        proposalId: p.id, tool: p.tool, kind, state: 'RESERVED', amount: kind === 'accept' ? p.bound?.disputedAmount || null : p.canonical?.amount || null };
+      writeLedger(store, p.disputeId).push(w); reservation = w;
+    }
+    return r;
+  }) : writeBlockers(store, p.disputeId, { kind, amountValue: p.canonical?.amount?.value, disputedValue: p.bound?.disputedAmount?.value, captureId: p.bound?.captureId, exceptId: p.id });
   if (pre.length) {
     p.status = 'BLOCKED_AT_APPROVAL'; p.blockedReasons = pre; store.save?.();
     store.audit({ type: 'AGENT_PROPOSAL_BLOCKED_AT_APPROVAL', proposalId: p.id, reasons: pre });
     throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'This dispute already has a write from ProofPilot (or one is running), or the refund would exceed the disputed amount. Nothing was sent.', { reasons: pre });
   }
   writesInFlight.add(p.disputeId);
-  try { return await runApproved({ api, store, engine, config }, p, h, kind); } finally { writesInFlight.delete(p.disputeId); }
+  try { return await runApproved({ api, store, engine, config }, p, h, kind, reservation); }
+  catch (e) {
+    // Anything that went wrong before PayPal was called releases the reservation (nothing was sent).
+    if (reservation && reservation.state === 'RESERVED') updateWrite(store, reservation.id, { failed: true, state: 'RELEASED', failure: e?.code || 'ERROR' });
+    throw e;
+  }
+  finally { writesInFlight.delete(p.disputeId); }
 }
-async function runApproved({ api, store, engine, config }, p, h, kind) {
+async function runApproved({ api, store, engine, config }, p, h, kind, reservation) {
   const a = await analyseDispute({ api, store, engine }, p.disputeId);
   const fresh = bindProposal(p.tool, p.canonical, { dispute: a._ctx.dispute, actions: a.status.actions, allowedTypes: a.allowedTypes,
     rejectedTypes: [...new Set(a.paypalRejected.map(r => r.type))], registry: a._ctx.recs.registry, final: { action: p.finalAction } });
@@ -289,20 +364,49 @@ async function runApproved({ api, store, engine, config }, p, h, kind) {
     store.audit({ type: 'AGENT_PROPOSAL_BLOCKED_AT_APPROVAL', proposalId: p.id, reasons: p.blockedReasons });
     throw new SubmitError('STALE_PROPOSAL', 'PayPal data changed since the proposal, or it no longer passes the checks. Nothing was sent.', { reasons: p.blockedReasons });
   }
-  // Refund total against the disputed amount, now also counting refunds PayPal reports on the fresh read.
-  if ((kind === 'refund' || kind === 'accept') && refundedSoFar(store, p.disputeId, a._ctx.recs.registry) + moneyOut(kind, p.canonical?.amount?.value, a.amount?.value) > (cents(a.amount?.value) ?? 0)) {
-    p.status = 'BLOCKED_AT_APPROVAL'; p.blockedReasons = ['REFUNDS_WOULD_EXCEED_DISPUTED']; store.save?.();
-    throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'Refunds on this dispute would exceed the disputed amount. Nothing was sent.', { reasons: p.blockedReasons });
+  // Refund total against the disputed amount and the payment, now also counting refunds PayPal reports on the fresh
+  // read (completed and pending), and every ProofPilot write on the same capture. This proposal's own reservation is
+  // excluded. Re-read from disk first.
+  store.reload?.();
+  if (kind === 'refund' || kind === 'accept') {
+    const capRec = a._ctx.recs.registry.all().find(r => r.type === 'capture');
+    const done = refundedSoFar(store, p.disputeId, a._ctx.recs.registry, { captureId: p.bound?.captureId, exceptEntryId: reservation?.id });
+    const maxes = [cents(a.amount?.value), cents(capRec?.data?.amount?.value)].filter(x => x != null);
+    if (!maxes.length || done + moneyOut(kind, p.canonical?.amount?.value, a.amount?.value) > Math.min(...maxes)) {
+      p.status = 'BLOCKED_AT_APPROVAL'; p.blockedReasons = ['REFUNDS_WOULD_EXCEED_DISPUTED']; store.save?.();
+      throw new SubmitError('ONE_WRITE_PER_DISPUTE', 'Refunds on this payment would exceed the disputed amount. Nothing was sent.', { reasons: p.blockedReasons });
+    }
   }
   store.audit({ type: 'AGENT_PROPOSAL_APPROVED', proposalId: p.id, tool: p.tool, hash: p.hash, dryRun: Boolean(config.dryRun) });
   if (config.dryRun) { p.status = 'APPROVED_DRY_RUN'; store.save?.(); return { dryRun: true, proposal: publicProposal(p), sent: p.canonical }; }
-  // Recorded before the call: if PayPal times out after acting, the dispute still counts as written (fail closed).
-  recordWrite(store, p.disputeId, { source: 'agent-proposal', proposalId: p.id, tool: p.tool, kind, amount: kind === 'accept' ? a.amount : p.canonical?.amount || null });
-  let result;
-  if (p.tool === 'propose_make_offer') result = await api.makeOffer(p.disputeId, { note: p.canonical.note, amount: p.canonical.amount });
-  else if (h.execute) result = await h.execute(p.canonical, {});
-  else throw new SubmitError('PROPOSAL_EXPIRED', 'The toolkit tool for this proposal is not loaded.');
+  if (!h.execute && p.tool !== 'propose_make_offer') throw new SubmitError('PROPOSAL_EXPIRED', 'The toolkit tool for this proposal is not loaded.');
+  // The reservation stays counted from here on: if PayPal times out after acting, the dispute still counts as written.
+  if (reservation) updateWrite(store, reservation.id, { state: 'SENDING' });
+  let result; let outcome;
+  try {
+    result = p.tool === 'propose_make_offer' ? await api.makeOffer(p.disputeId, { note: p.canonical.note, amount: p.canonical.amount }) : await h.execute(p.canonical, {});
+    outcome = classifyWriteOutcome(result);
+  } catch (e) {
+    outcome = e?.issue && e.status ? (e.status >= 400 && e.status < 500 ? { ok: false, rejected: true, status: e.status, code: e.issue, message: String(e.message || '').slice(0, 300) } : { ok: false, rejected: false, status: e.status, code: e.issue, message: String(e.message || '').slice(0, 300) })
+      : classifyWriteOutcome(e, true);
+  }
+  if (!outcome.ok) {
+    // Review v0.5 d: a write PayPal refused (4xx) is marked FAILED with a readable reason and releases the dispute.
+    // An unknown outcome (timeout, 5xx, no response) stays counted (fail closed) and is marked FAILED_UNCERTAIN.
+    const msg = redact(outcome.message || 'PayPal did not accept the request.');
+    p.status = outcome.rejected ? 'FAILED' : 'FAILED_UNCERTAIN';
+    p.failure = { status: outcome.status, code: outcome.code, message: msg, at: new Date().toISOString() };
+    if (reservation) updateWrite(store, reservation.id, outcome.rejected ? { failed: true, state: 'REJECTED_BY_PAYPAL', failure: outcome.code || outcome.status } : { state: 'UNKNOWN_OUTCOME' });
+    store.save?.();
+    store.audit({ type: outcome.rejected ? 'AGENT_PROPOSAL_REJECTED_BY_PAYPAL' : 'AGENT_PROPOSAL_OUTCOME_UNKNOWN', proposalId: p.id, tool: p.tool, status: outcome.status, code: outcome.code });
+    throw new SubmitError(outcome.rejected ? 'PAYPAL_REJECTED_WRITE' : 'PAYPAL_OUTCOME_UNKNOWN',
+      outcome.rejected ? `PayPal refused this ${human('tool', p.tool) || p.tool}${outcome.status ? ` (HTTP ${outcome.status})` : ''}: ${msg} Nothing was changed; the dispute is free for another action.`
+        : `ProofPilot could not confirm whether PayPal carried out this action (${msg}). It still counts as a write on this dispute, so nothing else will be sent automatically. Check the dispute in PayPal.`,
+      { proposal: publicProposal(p) });
+  }
+  if (reservation) updateWrite(store, reservation.id, { state: 'EXECUTED' });
   p.status = 'EXECUTED_AFTER_APPROVAL'; p.executedAt = new Date().toISOString(); store.save?.();
   store.audit({ type: 'AGENT_PROPOSAL_EXECUTED', proposalId: p.id, tool: p.tool });
-  return { dryRun: false, proposal: publicProposal(p), sent: p.canonical, result: JSON.parse(JSON.stringify(result ?? null)) };
+  let parsed = result; if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { /* keep text */ } }
+  return { dryRun: false, proposal: publicProposal(p), sent: p.canonical, result: JSON.parse(JSON.stringify(parsed ?? null)) };
 }

@@ -23,7 +23,7 @@ export function recordKey(type, id) { return `${type}:${id}`; }
 export function makeRegistry() {
   const map = new Map();
   return {
-    add(type, id, data, source, note) { if (id) map.set(recordKey(type, id), { type, id, source, note, verified: true, fetchedAt: new Date().toISOString(), data }); },
+    add(type, id, data, source, note, display) { if (id) map.set(recordKey(type, id), { type, id, source, note, ...(display ? { display } : {}), verified: true, fetchedAt: new Date().toISOString(), data }); },
     get(type, id) { return map.get(recordKey(type, id)); },
     has(type, id) { return map.has(recordKey(type, id)); },
     list() { return [...map.values()].map(({ data, ...r }) => r); },
@@ -56,7 +56,7 @@ export async function gatherRecords(api, dispute, store) {
     } catch (e) { gaps.push({ code: 'TRACKERS_UNAVAILABLE', message: `Could not read trackers: ${e.issue || e.message}` }); }
     for (const r of order?.purchase_units?.[0]?.payments?.refunds || []) {
       const cls = classifyRefund(r, dispute);
-      reg.add('refund', r.id, { ...r, proofpilot_classification: cls.kind }, 'GET /v2/checkout/orders/{id} (payments.refunds)', cls.label);
+      reg.add('refund', r.id, { ...r, proofpilot_classification: cls.kind }, 'GET /v2/checkout/orders/{id} (payments.refunds)', cls.label, cls.display);
     }
   } else gaps.push({ code: 'NO_SELLER_TXN', message: 'Dispute lists no seller transaction id.' });
   return { registry: reg, capture, order, trackers, gaps };
@@ -98,11 +98,22 @@ function trackerNote(t) {
 // seller issued, so it must never back a PROOF_OF_REFUND claim.
 export function classifyRefund(refund, dispute) {
   const t = Date.parse(refund?.create_time || 0);
-  const hold = (dispute?.fund_movements || []).find(m => m.reason === 'HOLD_PLACED' && m.amount?.value === refund?.amount?.value
+  const amt = refund?.amount; const disputed = dispute?.dispute_amount;
+  const hold = refund?.status !== 'COMPLETED' && (dispute?.fund_movements || []).find(m => m.reason === 'HOLD_PLACED' && m.amount?.value === amt?.value
+    && (!m.amount?.currency_code || !amt?.currency_code || m.amount.currency_code === amt.currency_code)
     && Math.abs(Date.parse(m.initiated_time || 0) - t) <= 120_000);
-  if (hold) return { kind: 'DISPUTE_HOLD', label: `PayPal dispute hold (not a seller refund): matches the dispute's HOLD_PLACED fund movement of ${hold.amount.currency_code} ${hold.amount.value} at ${hold.initiated_time}.` };
-  if (refund?.status !== 'COMPLETED') return { kind: 'PENDING_REVERSAL', label: `Refund record with status ${refund?.status}: not a completed refund.` };
-  return { kind: 'SELLER_REFUND', label: 'Completed refund.' };
+  if (hold) {
+    // The hold is usually the seller's NET amount (disputed amount minus PayPal's fee), e.g. USD 4.82 on a USD 5.50
+    // dispute, so it does not equal the disputed amount. Say so instead of calling it a refund.
+    const net = disputed && disputed.value !== hold.amount.value ? ` That is your net amount from the ${disputed.currency_code} ${disputed.value} disputed payment after PayPal's fee, not the disputed amount.` : '';
+    return { kind: 'DISPUTE_HOLD', display: 'PayPal dispute hold (not a refund)',
+      label: `PayPal dispute hold, not a refund: PayPal is holding ${hold.amount.currency_code} ${hold.amount.value} of your balance while the case is open (HOLD_PLACED at ${hold.initiated_time}).${net} No money went back to the buyer; ProofPilot does not count it as a refund or cite it as proof of refund.` };
+  }
+  if (refund?.status === 'COMPLETED') return { kind: 'SELLER_REFUND', display: 'Refund (completed)', label: `Completed refund of ${money(amt)} to the buyer.` };
+  // A pending seller refund is money on its way back to the buyer: it counts against the refund cap (review v0.5 b),
+  // but it is not yet proof of refund.
+  if (refund?.status === 'PENDING') return { kind: 'SELLER_REFUND_PENDING', display: 'Refund (pending)', label: `Pending refund of ${money(amt)}: counted as money returned for ProofPilot's refund limit, but not cited as proof of refund until PayPal completes it.` };
+  return { kind: 'NOT_A_REFUND', display: `Refund record (${refund?.status || 'no status'})`, label: `Refund record with status ${refund?.status || 'none'}: not money returned to the buyer.` };
 }
 
 // ---- Build candidate claims for one evidence type, each tied to record refs.
@@ -231,13 +242,30 @@ export function buyerAddressQuote(a) {
   const q = fmtAddr(a).replace(/["\u201c\u201d]/g, "'").replace(/\s+/g, ' ').trim().slice(0, 300);
   return `${BUYER_QUOTE_LABEL}: "${q}".`;
 }
-// Fields a buyer (or anyone but PayPal and the seller) can write. They are removed before the checker looks for an
-// amount, date or id "in the cited record", so a buyer cannot make a seller sentence pass by planting a value there.
-const BUYER_KEYS = /^(shipping|address|payer|payment_source|messages|notes|note|buyer|name|email_address|content|buyer_response_notes|comments?)$/i;
-export function sellerTrustedView(v, depth = 0) {
+// Buyer-written data, decided by PROVENANCE (review v0.5 c), not only by field name. Before the checker looks for an
+// amount, date or id "in the cited record", every part of a record that the buyer wrote or can influence is removed,
+// so a value planted there cannot make a seller sentence pass:
+//   - on a dispute: messages, every evidence / supporting_info entry not SUBMITTED_BY_SELLER or REQUESTED_FROM_SELLER
+//     (buyer evidence incl. its tracking_info and refund_ids), offer (buyer_requested_amount, history notes),
+//     extensions (service/item descriptions, buyer contact details, notes), communication_details, adjudications' notes,
+//     and the buyer object of each disputed transaction;
+//   - on any record: the generic buyer keys below (address, payer, names, notes, comments, ...), anything named
+//     buyer_* / *_note(s) / *_comment(s), and any object whose source says it came from the buyer.
+// What remains is written by PayPal or by the seller (ProofPilot's own backend), which is what a seller sentence may cite.
+const BUYER_KEYS = /^(shipping|address|payer|payment_source|messages|notes|note|buyer|buyer_.*|.*_notes?|.*_comments?|name|email_address|content|comments?|requested_amount|communication_details|service_details|description_by_buyer)$/i;
+const DISPUTE_BUYER_SUBTREES = /^(messages|offer|extensions|communication_details|supporting_info|refund_details|buyer_response_notes|money_movements_buyer)$/i;
+const SELLER_SOURCES = /^(SUBMITTED_BY_SELLER|REQUESTED_FROM_SELLER)$/;
+const fromBuyer = (o) => o && typeof o === 'object' && typeof o.source === 'string' && !SELLER_SOURCES.test(o.source) && /BUYER|PAYER|CUSTOMER|PARTNER/i.test(o.source);
+export function sellerTrustedView(v, depth = 0, { isDispute = null } = {}) {
   if (depth > 12 || v == null) return v;
-  if (Array.isArray(v)) return v.map(x => sellerTrustedView(x, depth + 1));
-  if (typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([k]) => !BUYER_KEYS.test(k)).map(([k, x]) => [k, sellerTrustedView(x, depth + 1)]));
+  if (Array.isArray(v)) return v.filter(x => !fromBuyer(x)).map(x => sellerTrustedView(x, depth + 1));
+  if (typeof v === 'object') {
+    const dispute = isDispute ?? (depth === 0 && typeof v.dispute_id === 'string');
+    let entries = Object.entries(v).filter(([k]) => !BUYER_KEYS.test(k));
+    if (dispute) entries = entries.filter(([k]) => !DISPUTE_BUYER_SUBTREES.test(k))
+      .map(([k, x]) => [k, k === 'evidences' && Array.isArray(x) ? x.filter(e => SELLER_SOURCES.test(String(e?.source || ''))) : x]);
+    return Object.fromEntries(entries.map(([k, x]) => [k, sellerTrustedView(x, depth + 1, { isDispute: false })]));
+  }
   return v;
 }
 // Is this claim exactly the quoted buyer field of a cited order record?

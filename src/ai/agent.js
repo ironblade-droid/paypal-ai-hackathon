@@ -58,15 +58,31 @@ export function markUntrusted(x) {
   const clipped = x.length > 300 ? x.slice(0, 300) + '…' : x;
   return UNTRUSTED_PREFIX + '«' + clipped.replace(/[«»]/g, '"') + '»';
 }
-export function redactDeep(v, depth = 0) {
+// Provenance (review v0.5 c): whole subtrees the buyer wrote or can influence are untrusted, whatever their keys:
+// service/item descriptions and other dispute extensions, buyer messages, the offer (buyer_requested_amount, notes),
+// communication details, supporting info, and any evidence or entry whose source is the buyer (including the tracking
+// numbers and refund ids inside buyer-submitted evidence). Every string inside is wrapped; numbers are stringified and
+// wrapped too, so a planted id or amount never reaches the model as a bare value.
+const BUYER_SUBTREE_KEY = /^(messages|service_details|merchandize_dispute_properties|extensions|offer|buyer_requested_amount|communication_details|supporting_info|buyer_response_notes|buyer)$/i;
+const isBuyerSourced = (o) => o && typeof o === 'object' && !Array.isArray(o) && typeof o.source === 'string' && /BUYER|PAYER|CUSTOMER/i.test(o.source) && !/^(SUBMITTED_BY_SELLER|REQUESTED_FROM_SELLER)$/.test(o.source);
+export function redactDeep(v, depth = 0, untrusted = false) {
   if (depth > 12) return '[…]';
-  if (Array.isArray(v)) return v.map(x => redactDeep(x, depth + 1));
-  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'links').map(([k, x]) => [k, PII_KEY.test(k) ? '[redacted]'
-    : (BUYER_TEXT_KEY.test(k) && typeof x === 'string') ? markUntrusted(redactDeep(x, depth + 1)) : redactDeep(x, depth + 1)]));
+  if (Array.isArray(v)) return v.map(x => redactDeep(x, depth + 1, untrusted));
+  if (v && typeof v === 'object') {
+    const u = untrusted || isBuyerSourced(v);
+    return Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'links').map(([k, x]) => {
+      if (PII_KEY.test(k)) return [k, '[redacted]'];
+      if (k === 'source' && typeof x === 'string') return [k, x]; // keep the provenance label itself readable
+      const sub = u || BUYER_SUBTREE_KEY.test(k);
+      if (!sub && BUYER_TEXT_KEY.test(k) && typeof x === 'string') return [k, markUntrusted(redactDeep(x, depth + 1))];
+      return [k, redactDeep(x, depth + 1, sub)];
+    }));
+  }
   // The toolkit returns most results as a JSON string: parse it so key-based redaction applies, then re-serialise.
-  if (typeof v === 'string' && /^\s*[[{]/.test(v)) { try { return JSON.stringify(redactDeep(JSON.parse(v), depth + 1)); } catch { /* not JSON */ } }
+  if (typeof v === 'string' && /^\s*[[{]/.test(v)) { try { return JSON.stringify(redactDeep(JSON.parse(v), depth + 1, untrusted)); } catch { /* not JSON */ } }
   // Emails and URLs are removed too (document download links are not needed by the model).
-  if (typeof v === 'string') return redact(v).replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]').replace(/https?:\/\/\S+/g, '[url]');
+  if (typeof v === 'string') { const r = redact(v).replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]').replace(/https?:\/\/\S+/g, '[url]'); return untrusted ? markUntrusted(r) : r; }
+  if (untrusted && typeof v === 'number') return markUntrusted(String(v));
   return v;
 }
 const clip = (o, n = 1500) => { if (typeof o === 'string') { try { o = JSON.parse(o); } catch { /* plain text */ } } const s = typeof o === 'string' ? o : JSON.stringify(o ?? null); return s.length > n ? s.slice(0, n) + '…' : s; };
